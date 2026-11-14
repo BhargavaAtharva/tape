@@ -385,3 +385,38 @@ func TestSelfTradePrevention(t *testing.T) {
 		t.Fatalf("cancel event %+v", c)
 	}
 }
+
+func TestOpenOrderCap(t *testing.T) {
+	b := New(0)
+	for i := range MaxOpenOrders {
+		if evs := b.Apply(limit(1, Buy, int64(100+i%5), 1)); evs[0].Kind != EvAccepted {
+			t.Fatalf("order %d: %+v", i, evs[0])
+		}
+	}
+	evs := b.Apply(limit(1, Buy, 100, 1))
+	if evs[0].Kind != EvRejected || evs[0].Reason != ReasonTooManyOrders {
+		t.Fatalf("order over the cap: %+v", evs)
+	}
+	// Orders that cannot rest are not limited, and other traders are not affected.
+	if evs := b.Apply(ioc(1, Buy, 100, 1)); evs[0].Kind != EvAccepted {
+		t.Fatalf("IOC over the cap: %+v", evs[0])
+	}
+	if evs := b.Apply(limit(2, Buy, 100, 1)); evs[0].Kind != EvAccepted {
+		t.Fatalf("other trader: %+v", evs[0])
+	}
+	b.Apply(cancel(1, 1))
+	if b.OpenOrders(1) != MaxOpenOrders-1 {
+		t.Fatalf("open orders %d after a cancel", b.OpenOrders(1))
+	}
+	if evs := b.Apply(limit(1, Buy, 100, 1)); evs[0].Kind != EvAccepted {
+		t.Fatalf("order after a cancel freed a slot: %+v", evs[0])
+	}
+	var ids []uint64
+	b.TraderOrders(2, func(o *Order) { ids = append(ids, o.ID) })
+	if len(ids) != 1 {
+		t.Fatalf("trader 2 orders %v", ids)
+	}
+	if err := checkInvariants(b); err != nil {
+		t.Fatal(err)
+	}
+}

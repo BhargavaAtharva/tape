@@ -51,6 +51,11 @@ const (
 	MaxQty   = 1 << 40
 )
 
+// MaxOpenOrders caps how many orders one trader may have resting on one
+// book. It is part of the matching rules rather than gateway policy so that
+// replaying the log enforces it identically.
+const MaxOpenOrders = 200
+
 // Command is the only way to change a book. Time is stamped by the caller
 // and copied onto the resulting events, so the book never reads a clock.
 //
@@ -121,6 +126,7 @@ const (
 	ReasonFOK
 	ReasonNoLiquidity
 	ReasonSelfTrade
+	ReasonTooManyOrders
 )
 
 var reasonNames = [...]string{
@@ -142,6 +148,7 @@ var reasonNames = [...]string{
 	ReasonFOK:             "fok_unfillable",
 	ReasonNoLiquidity:     "no_liquidity",
 	ReasonSelfTrade:       "self_trade",
+	ReasonTooManyOrders:   "too_many_open_orders",
 }
 
 func (r Reason) String() string {

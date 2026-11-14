@@ -125,7 +125,7 @@ func (b *Book) restoreSide(sd Side, data []byte) error {
 			last = s.getOrCreate(o.Price)
 		}
 		last.pushBack(o)
-		b.orders[o.ID] = o
+		b.index(o)
 	}
 	return nil
 }

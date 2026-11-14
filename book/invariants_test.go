@@ -19,6 +19,25 @@ func checkInvariants(b *Book) error {
 	if total != len(b.orders) {
 		return fmt.Errorf("levels hold %d orders, index holds %d", total, len(b.orders))
 	}
+	indexed := 0
+	for trader, t := range b.traders {
+		n := 0
+		var prev *Order
+		for o := t.head; o != nil; o = o.tnext {
+			if o.Trader != trader || o.tprev != prev || b.orders[o.ID] != o {
+				return fmt.Errorf("trader %d: order %d is mislinked in the trader index", trader, o.ID)
+			}
+			prev = o
+			n++
+		}
+		if n != t.n || t.tail != prev || n == 0 {
+			return fmt.Errorf("trader %d: index counts %d, list holds %d", trader, t.n, n)
+		}
+		indexed += n
+	}
+	if indexed != len(b.orders) {
+		return fmt.Errorf("trader index holds %d orders, book holds %d", indexed, len(b.orders))
+	}
 	if b.bids.best != nil && b.asks.best != nil && b.bids.best.price >= b.asks.best.price {
 		return fmt.Errorf("book crossed: bid %d >= ask %d", b.bids.best.price, b.asks.best.price)
 	}

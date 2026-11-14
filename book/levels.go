@@ -11,6 +11,8 @@ type Order struct {
 
 	prev, next *Order
 	level      *level
+	// tprev/tnext link the trader's resting orders on this book.
+	tprev, tnext *Order
 }
 
 // level is a FIFO queue of orders at one price. It is simultaneously a node

@@ -6,6 +6,9 @@ type Book struct {
 	bids   side
 	asks   side
 	orders map[uint64]*Order
+	// traders indexes resting orders by owner, for the open-order cap and
+	// for listing one trader's orders without scanning the book.
+	traders map[uint64]traderOrders
 
 	seq    uint64
 	nextID uint64
@@ -22,10 +25,11 @@ type Book struct {
 func New(idBase uint64) *Book {
 	seed := rand.Uint64()
 	return &Book{
-		bids:   side{sign: -1, seed: seed},
-		asks:   side{sign: 1, seed: seed},
-		orders: make(map[uint64]*Order),
-		nextID: idBase + 1,
+		bids:    side{sign: -1, seed: seed},
+		asks:    side{sign: 1, seed: seed},
+		orders:  make(map[uint64]*Order),
+		traders: make(map[uint64]traderOrders),
+		nextID:  idBase + 1,
 	}
 }
 
@@ -70,6 +74,57 @@ func (b *Book) Orders(s Side, fn func(*Order)) {
 		for o := lv.head; o != nil; o = o.next {
 			fn(o)
 		}
+	}
+}
+
+type traderOrders struct {
+	head, tail *Order
+	n          int
+}
+
+// OpenOrders is the number of orders the trader has resting.
+func (b *Book) OpenOrders(trader uint64) int { return b.traders[trader].n }
+
+// TraderOrders calls fn for each of the trader's resting orders, oldest
+// first. fn must not modify the book.
+func (b *Book) TraderOrders(trader uint64, fn func(*Order)) {
+	for o := b.traders[trader].head; o != nil; o = o.tnext {
+		fn(o)
+	}
+}
+
+func (b *Book) index(o *Order) {
+	t := b.traders[o.Trader]
+	o.tprev, o.tnext = t.tail, nil
+	if t.tail != nil {
+		t.tail.tnext = o
+	} else {
+		t.head = o
+	}
+	t.tail = o
+	t.n++
+	b.orders[o.ID] = o
+	b.traders[o.Trader] = t
+}
+
+func (b *Book) unindex(o *Order) {
+	t := b.traders[o.Trader]
+	if o.tprev != nil {
+		o.tprev.tnext = o.tnext
+	} else {
+		t.head = o.tnext
+	}
+	if o.tnext != nil {
+		o.tnext.tprev = o.tprev
+	} else {
+		t.tail = o.tprev
+	}
+	t.n--
+	delete(b.orders, o.ID)
+	if t.n == 0 {
+		delete(b.traders, o.Trader)
+	} else {
+		b.traders[o.Trader] = t
 	}
 }
 
@@ -170,6 +225,10 @@ func (b *Book) newOrder(c Command) {
 		b.reject(0, c.Trader, r)
 		return
 	}
+	if c.TIF == GTC && b.traders[c.Trader].n >= MaxOpenOrders {
+		b.reject(0, c.Trader, ReasonTooManyOrders)
+		return
+	}
 	t := taker{trader: c.Trader, side: c.Side, market: c.Type == Market, limit: c.Price, qty: c.Qty}
 	if c.PostOnly && b.wouldCross(&t) {
 		b.reject(0, c.Trader, ReasonWouldCross)
@@ -263,7 +322,7 @@ func (b *Book) match(t *taker) (selfTrade bool) {
 			})
 			if m.Qty == 0 {
 				lv.unlink(m)
-				delete(b.orders, m.ID)
+				b.unindex(m)
 				b.freeOrder(m)
 			}
 		}
@@ -301,7 +360,7 @@ func (b *Book) rest(t *taker, postOnly bool) {
 	o.ID, o.Trader, o.Price, o.Qty, o.Side, o.PostOnly = t.id, t.trader, t.limit, t.qty, t.side, postOnly
 	lv := b.side(o.Side).getOrCreate(o.Price)
 	lv.pushBack(o)
-	b.orders[o.ID] = o
+	b.index(o)
 	b.delta(o.Side, lv)
 }
 
@@ -323,7 +382,7 @@ func (b *Book) remove(o *Order) {
 	lv := o.level
 	s := b.side(o.Side)
 	lv.unlink(o)
-	delete(b.orders, o.ID)
+	b.unindex(o)
 	b.delta(o.Side, lv)
 	b.freeOrder(o)
 	if lv.head == nil {
