@@ -168,7 +168,16 @@ func (e *Engine) recover() error {
 			return fmt.Errorf("engine %s: %w", e.cfg.Symbol, err)
 		}
 	}
+	// Replayed events are handed out in batches of MaxBatch commands, the
+	// same granularity as live traffic, rather than one call per command.
 	var replayed uint64
+	var pending []book.Event
+	flush := func() {
+		if len(pending) > 0 && e.cfg.Events != nil {
+			e.cfg.Events(pending)
+		}
+		pending = nil
+	}
 	err = log.Replay(index, func(_ uint64, p []byte) error {
 		cmd, err := book.DecodeCommand(p)
 		if err != nil {
@@ -176,12 +185,14 @@ func (e *Engine) recover() error {
 		}
 		evs := e.book.Apply(cmd)
 		e.countFills(evs)
-		if e.cfg.Events != nil {
-			e.cfg.Events(evs)
-		}
+		pending = append(pending, evs...)
 		replayed++
+		if replayed%uint64(e.cfg.MaxBatch) == 0 {
+			flush()
+		}
 		return nil
 	})
+	flush()
 	if err != nil {
 		log.Close()
 		return fmt.Errorf("engine %s: replay: %w", e.cfg.Symbol, err)
