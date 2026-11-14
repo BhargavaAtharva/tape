@@ -109,7 +109,8 @@ func run(o options) error {
 	start := time.Now()
 	for si, sym := range o.symbols {
 		for w := range o.workers {
-			trader := uint64(si*o.workers + w + 1)
+			// Above the ids the demo simulator reserves for its bots.
+			trader := uint64(1000 + si*o.workers + w)
 			wg.Go(func() {
 				rng := rand.New(rand.NewPCG(trader, 1))
 				var resting []uint64

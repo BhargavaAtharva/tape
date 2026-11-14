@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -18,12 +19,14 @@ import (
 
 	"github.com/BhargavaAtharva/tape/api"
 	"github.com/BhargavaAtharva/tape/engine"
+	"github.com/BhargavaAtharva/tape/sim"
 	"github.com/BhargavaAtharva/tape/wal"
 )
 
 type config struct {
 	addr          string
 	symbols       []api.Symbol
+	refs          []int64
 	dataDir       string
 	walSync       wal.SyncPolicy
 	walInterval   time.Duration
@@ -32,6 +35,8 @@ type config struct {
 	rateLimit     float64
 	trustProxy    bool
 	feedBuffer    int
+	sim           bool
+	simIntensity  float64
 }
 
 func env(key, def string) string {
@@ -48,7 +53,7 @@ func loadConfig() (config, error) {
 		origins: strings.Split(env("TAPE_CORS_ORIGINS", "*"), ","),
 	}
 	var err error
-	if c.symbols, err = parseSymbols(env("TAPE_SYMBOLS", "BTC-USD:2,ETH-USD:2,SOL-USD:3,TAPE:2")); err != nil {
+	if c.symbols, c.refs, err = parseSymbols(env("TAPE_SYMBOLS", "BTC-USD:2:64250,ETH-USD:2:3120,SOL-USD:3:148.5,NIFTY:2:24350")); err != nil {
 		return c, err
 	}
 	if c.walSync, err = wal.ParseSyncPolicy(env("TAPE_WAL_SYNC", "batch")); err != nil {
@@ -69,22 +74,38 @@ func loadConfig() (config, error) {
 	if c.feedBuffer, err = strconv.Atoi(env("TAPE_FEED_BUFFER", "512")); err != nil {
 		return c, fmt.Errorf("TAPE_FEED_BUFFER: %w", err)
 	}
+	if c.sim, err = strconv.ParseBool(env("TAPE_SIM", "true")); err != nil {
+		return c, fmt.Errorf("TAPE_SIM: %w", err)
+	}
+	if c.simIntensity, err = strconv.ParseFloat(env("TAPE_SIM_INTENSITY", "1"), 64); err != nil {
+		return c, fmt.Errorf("TAPE_SIM_INTENSITY: %w", err)
+	}
 	return c, nil
 }
 
-// parseSymbols reads "NAME:scale,NAME:scale". The order matters once a data
+// parseSymbols reads "NAME:scale:ref,..." where ref is the simulator's
+// reference price in display units. The order matters once a data
 // directory exists, because a symbol's position is part of its order ids.
-func parseSymbols(s string) ([]api.Symbol, error) {
-	var out []api.Symbol
+func parseSymbols(s string) ([]api.Symbol, []int64, error) {
+	var syms []api.Symbol
+	var refs []int64
 	for item := range strings.SplitSeq(s, ",") {
-		name, scale, ok := strings.Cut(strings.TrimSpace(item), ":")
-		n, err := strconv.Atoi(scale)
-		if !ok || err != nil || n < 0 || n > 8 {
-			return nil, fmt.Errorf("TAPE_SYMBOLS: %q is not NAME:price_scale (scale 0..8)", item)
+		parts := strings.Split(strings.TrimSpace(item), ":")
+		if len(parts) != 3 {
+			return nil, nil, fmt.Errorf("TAPE_SYMBOLS: %q is not NAME:price_scale:reference_price", item)
 		}
-		out = append(out, api.Symbol{Name: name, PriceScale: n})
+		scale, err := strconv.Atoi(parts[1])
+		if err != nil || scale < 0 || scale > 8 {
+			return nil, nil, fmt.Errorf("TAPE_SYMBOLS: %q: price scale must be 0..8", item)
+		}
+		ref, err := strconv.ParseFloat(parts[2], 64)
+		if err != nil || ref <= 0 {
+			return nil, nil, fmt.Errorf("TAPE_SYMBOLS: %q: reference price must be positive", item)
+		}
+		syms = append(syms, api.Symbol{Name: parts[0], PriceScale: scale})
+		refs = append(refs, int64(math.Round(ref*math.Pow10(scale))))
 	}
-	return out, nil
+	return syms, refs, nil
 }
 
 func main() {
@@ -109,7 +130,8 @@ func run() error {
 		Origins:    cfg.origins,
 		RateLimit:  cfg.rateLimit,
 		TrustProxy: cfg.trustProxy,
-		Info:       map[string]string{"wal_sync": durability},
+		MinTrader:  sim.MaxBotTrader + 1,
+		Info:       map[string]string{"wal_sync": durability, "simulator": strconv.FormatBool(cfg.sim)},
 	}, cfg.feedBuffer, func(c *engine.Config) {
 		if cfg.dataDir != "" {
 			c.Dir = filepath.Join(cfg.dataDir, c.Symbol)
@@ -126,6 +148,27 @@ func run() error {
 		}
 	}
 
+	simCtx, stopSim := context.WithCancel(context.Background())
+	simDone := make(chan struct{})
+	if cfg.sim {
+		markets := make([]sim.Market, len(cfg.symbols))
+		for i, s := range cfg.symbols {
+			markets[i] = sim.Market{Symbol: s.Name, Ref: cfg.refs[i]}
+		}
+		go func() {
+			defer close(simDone)
+			if err := sim.Run(simCtx, st.Exchange, sim.Config{Markets: markets, Intensity: cfg.simIntensity, Seed: uint64(time.Now().UnixNano())}); err != nil {
+				slog.Error("simulator stopped", "err", err)
+			}
+		}()
+	} else {
+		close(simDone)
+	}
+	shutdownSim := func() {
+		stopSim()
+		<-simDone
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.addr,
 		Handler:           st.Server,
@@ -134,17 +177,19 @@ func run() error {
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
-	slog.Info("listening", "addr", cfg.addr, "symbols", len(cfg.symbols), "wal", durability, "data", cfg.dataDir)
+	slog.Info("listening", "addr", cfg.addr, "symbols", len(cfg.symbols), "wal", durability, "data", cfg.dataDir, "sim", cfg.sim)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	select {
 	case err := <-errc:
+		shutdownSim()
 		st.Close()
 		return err
 	case <-ctx.Done():
 	}
 	slog.Info("shutting down")
+	shutdownSim()
 	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(sctx); err != nil && !errors.Is(err, context.DeadlineExceeded) {

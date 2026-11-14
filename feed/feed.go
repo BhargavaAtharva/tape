@@ -65,7 +65,7 @@ type Snapshot struct {
 	Seq    uint64     `json:"seq"`
 	Bids   [][2]int64 `json:"bids"`
 	Asks   [][2]int64 `json:"asks"`
-	Trades []Trade    `json:"trades"`
+	Trades []Trade    `json:"trades,omitempty"`
 }
 
 // Ticker summarises trading since the process started.
@@ -338,7 +338,9 @@ func (f *Feed) snapshotLocked(depth, trades int) Snapshot {
 func (f *Feed) Book(depth int) Snapshot {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.snapshotLocked(depth, 0)
+	snap := f.snapshotLocked(depth, 0)
+	snap.Trades = nil
+	return snap
 }
 
 // Trades returns up to n recent trades, oldest first.

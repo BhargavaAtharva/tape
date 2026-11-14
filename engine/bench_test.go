@@ -42,4 +42,3 @@ func BenchmarkSubmitInMemory(b *testing.B) {
 func BenchmarkSubmitWALNoSync(b *testing.B) {
 	benchEngine(b, Config{Symbol: "X", IDBase: testIDBase, Dir: b.TempDir(), WAL: wal.Options{Sync: wal.SyncNone}})
 }
-

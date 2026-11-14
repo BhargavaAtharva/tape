@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -106,10 +107,10 @@ func rejectStatus(r book.Reason) int {
 	return http.StatusUnprocessableEntity
 }
 
-func traderID(w http.ResponseWriter, r *http.Request) (uint64, bool) {
+func (s *Server) traderID(w http.ResponseWriter, r *http.Request) (uint64, bool) {
 	id, err := strconv.ParseUint(r.Header.Get("X-Trader-ID"), 10, 64)
-	if err != nil || id == 0 || id > maxTrader {
-		writeError(w, http.StatusUnauthorized, "invalid_trader", "X-Trader-ID must be an integer between 1 and 2^53-1")
+	if err != nil || id < s.cfg.MinTrader || id > maxTrader {
+		writeError(w, http.StatusUnauthorized, "invalid_trader", fmt.Sprintf("X-Trader-ID must be an integer from %d to 2^53-1", s.cfg.MinTrader))
 		return 0, false
 	}
 	return id, true
@@ -174,7 +175,7 @@ func (o newOrderRequest) command(trader uint64) (book.Command, string) {
 }
 
 func (s *Server) handleNewOrder(w http.ResponseWriter, r *http.Request) {
-	trader, ok := traderID(w, r)
+	trader, ok := s.traderID(w, r)
 	if !ok {
 		return
 	}
@@ -222,7 +223,7 @@ func (s *Server) orderTarget(w http.ResponseWriter, r *http.Request) (*engine.En
 }
 
 func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
-	trader, ok := traderID(w, r)
+	trader, ok := s.traderID(w, r)
 	if !ok {
 		return
 	}
@@ -239,7 +240,7 @@ type amendRequest struct {
 }
 
 func (s *Server) handleAmend(w http.ResponseWriter, r *http.Request) {
-	trader, ok := traderID(w, r)
+	trader, ok := s.traderID(w, r)
 	if !ok {
 		return
 	}
@@ -266,7 +267,7 @@ type openOrder struct {
 // no per-trader index because matching never needs one; a linear scan is
 // fine for a status query.
 func (s *Server) handleOpenOrders(w http.ResponseWriter, r *http.Request) {
-	trader, ok := traderID(w, r)
+	trader, ok := s.traderID(w, r)
 	if !ok {
 		return
 	}

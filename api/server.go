@@ -31,6 +31,9 @@ type Config struct {
 	// RateLimit is order-entry requests per second per client address, with
 	// a burst of twice that. Zero disables limiting.
 	RateLimit float64
+	// MinTrader is the lowest trader id clients may use; ids below it are
+	// reserved for the in-process simulator.
+	MinTrader uint64
 	// TrustProxy takes the client address from X-Forwarded-For.
 	TrustProxy bool
 	// WriteTimeout bounds one WebSocket write; a client that cannot take a
@@ -51,6 +54,7 @@ type Server struct {
 }
 
 func New(cfg Config, x *engine.Exchange, feeds map[string]*feed.Feed) *Server {
+	cfg.MinTrader = max(cfg.MinTrader, 1)
 	if cfg.WriteTimeout <= 0 {
 		cfg.WriteTimeout = 5 * time.Second
 	}
