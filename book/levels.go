@@ -70,25 +70,6 @@ type side struct {
 	free *level
 }
 
-func (s *side) find(price int64) *level {
-	key := price * s.sign
-	if s.best != nil && s.best.key == key {
-		return s.best
-	}
-	n := s.root
-	for n != nil {
-		switch {
-		case key < n.key:
-			n = n.left
-		case key > n.key:
-			n = n.right
-		default:
-			return n
-		}
-	}
-	return nil
-}
-
 func (s *side) getOrCreate(price int64) *level {
 	key := price * s.sign
 	if s.best != nil && s.best.key == key {

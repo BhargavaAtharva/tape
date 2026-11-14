@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { levelKey, type FeedStatus, type MarketView } from "../lib/feed";
+import { levelKey, type MarketView } from "../lib/feed";
 import { formatPrice, formatQty } from "../lib/format";
 import type { Side } from "../lib/types";
 import { Empty, Panel } from "./Panel";
@@ -31,10 +31,6 @@ function ladder(levels: Map<number, number>, side: Side, depth: number): Row[] {
     total += qty;
     return { price, qty, total };
   });
-}
-
-export function statusLabel(s: FeedStatus): string {
-  return { connecting: "connecting", live: "live", resyncing: "resyncing", offline: "offline" }[s];
 }
 
 // useFit reports how many whole rows fit on each side of the ladder, so the
