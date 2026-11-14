@@ -45,7 +45,7 @@ func main() {
 	var symbols, policy string
 	flag.StringVar(&o.mode, "mode", "engine", "engine (in-process, WAL on) or http")
 	flag.StringVar(&o.url, "url", "http://localhost:8081", "server base URL for http mode")
-	flag.StringVar(&symbols, "symbols", "BTC-USD,ETH-USD,SOL-USD,TAPE", "symbols to trade")
+	flag.StringVar(&symbols, "symbols", "BTC-USD,ETH-USD,SOL-USD,NIFTY", "symbols to trade")
 	flag.IntVar(&o.workers, "workers", 16, "concurrent clients per symbol")
 	flag.DurationVar(&o.duration, "duration", 10*time.Second, "how long to run")
 	flag.StringVar(&policy, "sync", "batch", "WAL sync policy for engine mode: batch, interval or none")
@@ -237,19 +237,23 @@ func httpSubmitter(base string, conns int) submitter {
 			return 0, err
 		}
 		defer resp.Body.Close()
+		// Engine rejections (422) and cancels of orders that have already
+		// traded away (404) are normal outcomes; anything else is a failure.
+		switch {
+		case resp.StatusCode == http.StatusTooManyRequests:
+			return 0, errors.New("rate limited: start the server with TAPE_RATE_LIMIT=0")
+		case resp.StatusCode == http.StatusOK, resp.StatusCode == http.StatusUnprocessableEntity:
+		case resp.StatusCode == http.StatusNotFound && c.Kind == book.CmdCancel:
+		default:
+			msg, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
+			return 0, fmt.Errorf("status %d: %s", resp.StatusCode, bytes.TrimSpace(msg))
+		}
 		var out struct {
 			OrderID uint64 `json:"order_id"`
 			Status  string `json:"status"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 			return 0, err
-		}
-		io.Copy(io.Discard, resp.Body)
-		switch {
-		case resp.StatusCode == http.StatusTooManyRequests:
-			return 0, errors.New("rate limited: start the server with TAPE_RATE_LIMIT=0")
-		case resp.StatusCode >= 500:
-			return 0, fmt.Errorf("server error %d", resp.StatusCode)
 		}
 		if out.Status == "resting" {
 			return out.OrderID, nil
