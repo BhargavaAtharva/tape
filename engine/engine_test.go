@@ -242,7 +242,7 @@ func TestExchangeRoutesBySymbolAndOrderID(t *testing.T) {
 }
 
 func TestOpenExchangeRejectsBadSymbolLists(t *testing.T) {
-	for _, symbols := range [][]string{nil, {"A", "A"}, {"A", ""}} {
+	for _, symbols := range [][]string{nil, {"A", "A"}, {"A", ""}, {"../X"}, {"btc"}, {".A"}, {"ABCDEFGHIJKLMNOPQ"}} {
 		if _, err := OpenExchange(symbols, nil); err == nil {
 			t.Fatalf("symbols %q accepted", symbols)
 		}

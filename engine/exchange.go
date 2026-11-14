@@ -33,9 +33,9 @@ func OpenExchange(symbols []string, configure func(*Config)) (*Exchange, error) 
 	}
 	x := &Exchange{byName: make(map[string]*Engine, len(symbols))}
 	for i, s := range symbols {
-		if s == "" || x.byName[s] != nil {
+		if !validSymbol(s) || x.byName[s] != nil {
 			x.Close()
-			return nil, fmt.Errorf("engine: empty or duplicate symbol %q", s)
+			return nil, fmt.Errorf("engine: invalid or duplicate symbol %q", s)
 		}
 		cfg := Config{Symbol: s, IDBase: uint64(i+1) << idShift}
 		if configure != nil {
@@ -82,4 +82,20 @@ func (x *Exchange) Close() error {
 		}
 	}
 	return first
+}
+
+// validSymbol keeps symbols short and safe to use as a directory name and in
+// a URL path: 1 to 16 characters from A-Z, 0-9, '-' and '.', not starting
+// with '.'.
+func validSymbol(s string) bool {
+	if len(s) == 0 || len(s) > 16 || s[0] == '.' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '.') {
+			return false
+		}
+	}
+	return true
 }

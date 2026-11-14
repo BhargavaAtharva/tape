@@ -108,3 +108,29 @@ func TestRestoreRejectsMalformedInput(t *testing.T) {
 		})
 	}
 }
+
+func TestCommandCodecRoundTrip(t *testing.T) {
+	for _, c := range []Command{
+		{Kind: CmdNew, Side: Buy, Type: Limit, TIF: GTC, PostOnly: true, Time: 1 << 62, Trader: 9, Price: MaxPrice, Qty: 3},
+		{Kind: CmdCancel, Trader: 1, OrderID: 7 << 40},
+		{Kind: CmdAmend, Trader: 2, OrderID: 5, Price: -1, Qty: -7, Time: -3},
+		{},
+	} {
+		p := AppendCommand(nil, c)
+		if len(p) != CommandSize {
+			t.Fatalf("encoded %d bytes, want %d", len(p), CommandSize)
+		}
+		got, err := DecodeCommand(p)
+		if err != nil || got != c {
+			t.Fatalf("round trip of %+v gave %+v, %v", c, got, err)
+		}
+	}
+	p := AppendCommand(nil, Command{Kind: CmdNew})
+	if _, err := DecodeCommand(p[:len(p)-1]); !errors.Is(err, ErrBadCommand) {
+		t.Fatalf("short record: %v", err)
+	}
+	p[0] = 99
+	if _, err := DecodeCommand(p); !errors.Is(err, ErrBadCommand) {
+		t.Fatalf("unknown version: %v", err)
+	}
+}
