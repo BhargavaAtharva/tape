@@ -1,0 +1,154 @@
+.panel {
+  overflow: hidden;
+}
+
+.ladder {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.cols,
+.row,
+.spread {
+  display: grid;
+  grid-template-columns: 1.3fr 1fr 1fr;
+  align-items: center;
+  padding: 0 8px;
+  gap: 8px;
+}
+
+.cols {
+  height: 22px;
+  color: var(--text-3);
+  font-size: 10.5px;
+  border-bottom: 1px solid var(--line);
+}
+
+.cols span,
+.row > span:not(.bar):not(.flash) {
+  text-align: right;
+}
+
+.cols span:first-child {
+  text-align: left;
+}
+
+.side {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.asks {
+  justify-content: flex-end;
+}
+
+.row {
+  position: relative;
+  height: var(--row);
+  flex: none;
+  width: 100%;
+  border: 0;
+  background: none;
+  font-size: 12px;
+  text-align: left;
+}
+
+.row:hover {
+  background: var(--raised);
+}
+
+.bar {
+  position: absolute;
+  inset: 1px 0 1px auto;
+  pointer-events: none;
+}
+
+.bidRow .bar {
+  background: var(--bid-soft);
+}
+
+.askRow .bar {
+  background: var(--ask-soft);
+}
+
+.flash {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  animation: flash 700ms ease-out forwards;
+}
+
+.bidRow .flash {
+  background: var(--bid-flash);
+}
+
+.askRow .flash {
+  background: var(--ask-flash);
+}
+
+@keyframes flash {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+.price {
+  position: relative;
+  text-align: left !important;
+}
+
+.bidRow .price {
+  color: var(--bid);
+}
+
+.askRow .price {
+  color: var(--ask);
+}
+
+.qty {
+  color: var(--text);
+}
+
+.total {
+  color: var(--text-2);
+}
+
+.mine {
+  position: absolute;
+  left: -6px;
+  top: 50%;
+  width: 4px;
+  height: 4px;
+  margin-top: -2px;
+  border-radius: 1px;
+  background: var(--accent);
+}
+
+.spread {
+  height: 26px;
+  flex: none;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: var(--raised);
+}
+
+.spread span:not(:first-child) {
+  text-align: right;
+}
+
+.resync {
+  padding: 1px 6px;
+  border-radius: 2px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 600;
+}

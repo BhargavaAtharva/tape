@@ -1,0 +1,141 @@
+:root {
+  --bg: #0e0f11;
+  --panel: #15171a;
+  --raised: #1b1e22;
+  --line: #24272c;
+  --line-strong: #30343a;
+  --text: #d9dce1;
+  --text-2: #9aa0a8;
+  --text-3: #636a73;
+  --accent: #e3a33b;
+  --accent-soft: rgba(227, 163, 59, 0.14);
+  --bid: #45a777;
+  --ask: #d4645d;
+  --bid-soft: rgba(69, 167, 119, 0.13);
+  --ask-soft: rgba(212, 100, 93, 0.13);
+  --bid-flash: rgba(69, 167, 119, 0.35);
+  --ask-flash: rgba(212, 100, 93, 0.35);
+
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --sans: "Inter Tight", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --radius: 3px;
+  --row: 20px;
+
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f3f2ee;
+    --panel: #fbfaf8;
+    --raised: #efeee9;
+    --line: #e1dfd8;
+    --line-strong: #cfccc3;
+    --text: #1b1d20;
+    --text-2: #575c63;
+    --text-3: #8a8f96;
+    --accent: #b5770f;
+    --accent-soft: rgba(181, 119, 15, 0.12);
+    --bid: #1d7a4c;
+    --ask: #b33a33;
+    --bid-soft: rgba(29, 122, 76, 0.1);
+    --ask-soft: rgba(179, 58, 51, 0.1);
+    --bid-flash: rgba(29, 122, 76, 0.28);
+    --ask-flash: rgba(179, 58, 51, 0.28);
+    color-scheme: light;
+  }
+}
+
+:root[data-theme="light"] {
+  --bg: #f3f2ee;
+  --panel: #fbfaf8;
+  --raised: #efeee9;
+  --line: #e1dfd8;
+  --line-strong: #cfccc3;
+  --text: #1b1d20;
+  --text-2: #575c63;
+  --text-3: #8a8f96;
+  --accent: #b5770f;
+  --accent-soft: rgba(181, 119, 15, 0.12);
+  --bid: #1d7a4c;
+  --ask: #b33a33;
+  --bid-soft: rgba(29, 122, 76, 0.1);
+  --ask-soft: rgba(179, 58, 51, 0.1);
+  --bid-flash: rgba(29, 122, 76, 0.28);
+  --ask-flash: rgba(179, 58, 51, 0.28);
+  color-scheme: light;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 500 12px/1.4 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "cv11", "ss01";
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.num {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "zero" 0;
+  letter-spacing: -0.01em;
+}
+
+.bid {
+  color: var(--bid);
+}
+
+.ask {
+  color: var(--ask);
+}
+
+.muted {
+  color: var(--text-3);
+}
+
+/* Small uppercase labels used for panel titles and field names. */
+.label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

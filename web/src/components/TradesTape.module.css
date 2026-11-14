@@ -1,0 +1,46 @@
+.panel {
+  overflow: hidden;
+}
+
+.list {
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 92px minmax(84px, 120px) minmax(48px, 80px) 1fr;
+  align-items: center;
+  gap: 8px;
+  height: var(--row);
+  padding: 0 8px;
+}
+
+.row > :nth-child(2),
+.row > :nth-child(3) {
+  text-align: right;
+}
+
+.head {
+  position: sticky;
+  top: 0;
+  height: 22px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  color: var(--text-3);
+  font-size: 10.5px;
+}
+
+.tag {
+  color: var(--text-3);
+}
+
+.tag b {
+  margin-left: 6px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.mine {
+  background: var(--accent-soft);
+}

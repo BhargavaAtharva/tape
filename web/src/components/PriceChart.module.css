@@ -1,0 +1,66 @@
+.panel {
+  overflow: hidden;
+}
+
+.plot {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  cursor: crosshair;
+  touch-action: pan-y;
+}
+
+.plot canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+}
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+}
+
+.legend {
+  position: absolute;
+  top: 6px;
+  left: 8px;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 11px;
+  color: var(--text-2);
+  pointer-events: none;
+}
+
+.legend i {
+  font-style: normal;
+  color: var(--text-3);
+  margin-right: 4px;
+}
+
+.intervals {
+  display: flex;
+  gap: 2px;
+}
+
+.intervals button {
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  background: none;
+  color: var(--text-3);
+  font: 500 11px var(--mono);
+}
+
+.intervals button:hover {
+  color: var(--text);
+}
+
+.intervals .active {
+  border-color: var(--line-strong);
+  color: var(--accent);
+}

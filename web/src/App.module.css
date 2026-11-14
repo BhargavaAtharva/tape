@@ -1,0 +1,133 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  gap: 4px;
+  padding: 4px;
+  grid-template-columns: 300px minmax(0, 1fr) 300px;
+  grid-template-rows: minmax(0, 1fr) 232px;
+  grid-template-areas:
+    "book chart trade"
+    "book tape engine";
+}
+
+.grid > div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.grid > div > section {
+  flex: 1;
+}
+
+.book {
+  grid-area: book;
+}
+
+.chart {
+  grid-area: chart;
+}
+
+.trade {
+  grid-area: trade;
+  gap: 4px;
+}
+
+.trade > section:first-child {
+  flex: none;
+}
+
+.tape {
+  grid-area: tape;
+}
+
+.engine {
+  grid-area: engine;
+}
+
+.tabs {
+  display: none;
+}
+
+@media (max-width: 1180px) and (min-width: 901px) {
+  .grid {
+    grid-template-columns: 260px minmax(0, 1fr) 280px;
+  }
+}
+
+/* Narrow screens: one section at a time behind tabs. */
+@media (max-width: 900px) {
+  .tabs {
+    display: flex;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+    overflow-x: auto;
+  }
+
+  .tabs button {
+    flex: 1;
+    height: 32px;
+    padding: 0 12px;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    background: none;
+    color: var(--text-2);
+    font-weight: 600;
+    text-transform: capitalize;
+  }
+
+  .tabs .tabOn {
+    color: var(--text);
+    border-bottom-color: var(--accent);
+  }
+
+  .grid {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .grid > div {
+    display: none;
+    flex: 1;
+  }
+
+  .grid[data-tab="book"] .book,
+  .grid[data-tab="chart"] .chart,
+  .grid[data-tab="trade"] .trade,
+  .grid[data-tab="tape"] .tape,
+  .grid[data-tab="engine"] .engine {
+    display: flex;
+  }
+
+  .trade {
+    overflow-y: auto;
+  }
+}
+
+.fatal {
+  display: grid;
+  place-content: center;
+  height: 100%;
+  gap: 4px;
+  text-align: center;
+  color: var(--text-2);
+}
+
+.fatal p {
+  margin: 0;
+}
+
+.fatal p:first-child {
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 14px;
+}
