@@ -334,7 +334,9 @@ func TestParseSyncPolicy(t *testing.T) {
 
 func TestSnapshots(t *testing.T) {
 	dir := t.TempDir()
-	if idx, state, err := LoadSnapshot(dir); err != nil || idx != 0 || state != nil {
+	var state []byte
+	keep := func(s []byte) error { state = s; return nil }
+	if idx, err := LoadSnapshot(dir, keep); err != nil || idx != 0 || state != nil {
 		t.Fatalf("empty dir: %d %q %v", idx, state, err)
 	}
 	for _, i := range []uint64{10, 20, 30} {
@@ -344,7 +346,7 @@ func TestSnapshots(t *testing.T) {
 	}
 	os.WriteFile(filepath.Join(dir, snapshotName(40)+tempSuffix), []byte("half"), 0o644)
 
-	idx, state, err := LoadSnapshot(dir)
+	idx, err := LoadSnapshot(dir, keep)
 	if err != nil || idx != 30 || string(state) != "state@30" {
 		t.Fatalf("got %d %q %v", idx, state, err)
 	}
@@ -356,9 +358,21 @@ func TestSnapshots(t *testing.T) {
 	data, _ := os.ReadFile(newest)
 	data[len(data)-1] ^= 1
 	os.WriteFile(newest, data, 0o644)
-	idx, state, err = LoadSnapshot(dir)
+	idx, err = LoadSnapshot(dir, keep)
 	if err != nil || idx != 20 || string(state) != "state@20" {
 		t.Fatalf("with newest damaged: %d %q %v", idx, state, err)
+	}
+
+	// A snapshot the caller cannot use is skipped like a damaged one.
+	idx, err = LoadSnapshot(dir, func(s []byte) error {
+		if string(s) == "state@20" {
+			return errors.New("cannot restore")
+		}
+		state = s
+		return nil
+	})
+	if err != nil || idx != 10 || string(state) != "state@10" {
+		t.Fatalf("with newest rejected: %d %q %v", idx, state, err)
 	}
 
 	if err := RemoveSnapshot(dir, 10); err != nil {

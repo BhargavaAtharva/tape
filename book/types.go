@@ -55,6 +55,13 @@ const (
 	MaxQty   = 1 << 40
 )
 
+// A book issues at most 2^OrderIDBits-1 order ids above its base, so books
+// given bases a multiple of 2^OrderIDBits apart never collide.
+const (
+	OrderIDBits = 40
+	maxOrderID  = 1<<OrderIDBits - 1
+)
+
 // MaxOpenOrders caps how many orders one trader may have resting on one
 // book. It is part of the matching rules rather than gateway policy so that
 // replaying the log enforces it identically.
@@ -142,6 +149,7 @@ const (
 	ReasonAmendedToFilled
 	ReasonInvalidTTL
 	ReasonExpired
+	ReasonIDsExhausted
 )
 
 var reasonNames = [...]string{
@@ -167,6 +175,7 @@ var reasonNames = [...]string{
 	ReasonAmendedToFilled: "amended_below_filled",
 	ReasonInvalidTTL:      "invalid_ttl",
 	ReasonExpired:         "expired",
+	ReasonIDsExhausted:    "order_ids_exhausted",
 }
 
 func (r Reason) String() string {

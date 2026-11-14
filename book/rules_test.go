@@ -515,3 +515,43 @@ func TestOrdersExpireAfterTheirTTL(t *testing.T) {
 		t.Fatalf("TTL on IOC: %+v", evs[0])
 	}
 }
+
+func TestValidateIsStatic(t *testing.T) {
+	for _, tc := range []struct {
+		c    Command
+		want Reason
+	}{
+		{limit(1, Buy, 100, 1), ReasonNone},
+		{limit(0, Buy, 100, 1), ReasonInvalidTrader},
+		{limit(1, Buy, 0, 1), ReasonInvalidPrice},
+		{cancel(1, 42), ReasonNone},
+		{cancel(1, 0), ReasonUnknownOrder},
+		{amend(1, 5, 0, 0), ReasonNoChange},
+		{amend(1, 5, -1, 0), ReasonInvalidPrice},
+		{amend(0, 5, 0, 3), ReasonInvalidTrader},
+		{Command{Kind: CmdExpire}, ReasonInvalidCommand},
+		{Command{Kind: 9}, ReasonInvalidCommand},
+	} {
+		if got := Validate(tc.c); got != tc.want {
+			t.Errorf("%+v: %v, want %v", tc.c, got, tc.want)
+		}
+	}
+}
+
+func TestOrderIDsRunOut(t *testing.T) {
+	b := New(3 << OrderIDBits)
+	b.nextID = 3<<OrderIDBits + maxOrderID
+	if evs := b.Apply(limit(1, Buy, 100, 1)); evs[0].Kind != EvAccepted || evs[0].OrderID != 4<<OrderIDBits-1 {
+		t.Fatalf("last id: %+v", evs[0])
+	}
+	if evs := b.Apply(limit(1, Buy, 100, 1)); evs[0].Reason != ReasonIDsExhausted {
+		t.Fatalf("past the last id: %+v", evs[0])
+	}
+	r, err := Restore(b.AppendSnapshot(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evs := r.Apply(limit(1, Buy, 100, 1)); evs[0].Reason != ReasonIDsExhausted {
+		t.Fatalf("restored book forgot its id range: %+v", evs[0])
+	}
+}

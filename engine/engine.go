@@ -18,7 +18,11 @@ import (
 	"github.com/BhargavaAtharva/tape/wal"
 )
 
-var ErrClosed = errors.New("engine: closed")
+var (
+	ErrClosed = errors.New("engine: closed")
+	// ErrBusy is returned by TrySubmit when the inbound queue is full.
+	ErrBusy = errors.New("engine: queue full")
+)
 
 type Config struct {
 	Symbol string
@@ -150,16 +154,15 @@ func Open(cfg Config) (*Engine, error) {
 // events are byte-for-byte those of the original run.
 func (e *Engine) recover() error {
 	start := time.Now()
-	index, state, err := wal.LoadSnapshot(e.cfg.Dir)
+	index, err := wal.LoadSnapshot(e.cfg.Dir, func(state []byte) error {
+		b, err := book.Restore(state)
+		if err == nil {
+			e.book = b
+		}
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("engine %s: %w", e.cfg.Symbol, err)
-	}
-	if state != nil {
-		b, err := book.Restore(state)
-		if err != nil {
-			return fmt.Errorf("engine %s: snapshot %d: %w", e.cfg.Symbol, index, err)
-		}
-		e.book = b
 	}
 	log, err := wal.Open(e.cfg.Dir, e.cfg.WAL)
 	if err != nil {
@@ -240,7 +243,18 @@ func (e *Engine) Close() error {
 	if e.started.Load() {
 		<-e.done
 	}
+	if err := e.Err(); err != nil {
+		return err
+	}
 	return e.closeErr
+}
+
+// Err reports why the engine stopped, if it failed.
+func (e *Engine) Err() error {
+	if p := e.failure.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 // replies recycles reply channels. A channel goes back only after its reply
@@ -248,10 +262,26 @@ func (e *Engine) Close() error {
 // written to by the engine and is left to the garbage collector.
 var replies = sync.Pool{New: func() any { return make(chan reply, 1) }}
 
-// Submit queues a command and waits for its result.
+// Submit queues a command and waits for its result. A command that is
+// invalid whatever the book's state is rejected here, before it is logged,
+// so it costs no log record and no sequence number; its Rejected event has
+// Seq 0 and is not published.
 func (e *Engine) Submit(ctx context.Context, cmd book.Command) (Result, error) {
+	return e.submit(ctx, cmd, true)
+}
+
+// TrySubmit is Submit without waiting for queue space: if the engine is
+// saturated it fails fast with ErrBusy, which the gateway turns into 429.
+func (e *Engine) TrySubmit(ctx context.Context, cmd book.Command) (Result, error) {
+	return e.submit(ctx, cmd, false)
+}
+
+func (e *Engine) submit(ctx context.Context, cmd book.Command, wait bool) (Result, error) {
+	if r := book.Validate(cmd); r != book.ReasonNone {
+		return Result{Events: []book.Event{{Kind: book.EvRejected, OrderID: cmd.OrderID, Trader: cmd.Trader, Reason: r}}}, nil
+	}
 	ch := replies.Get().(chan reply)
-	if err := e.send(ctx, request{cmd: cmd, reply: ch, enq: time.Now()}); err != nil {
+	if err := e.send(ctx, request{cmd: cmd, reply: ch, enq: time.Now()}, wait); err != nil {
 		replies.Put(ch)
 		return Result{}, err
 	}
@@ -264,21 +294,24 @@ func (e *Engine) Submit(ctx context.Context, cmd book.Command) (Result, error) {
 
 // Enqueue queues a command without waiting for the result.
 func (e *Engine) Enqueue(ctx context.Context, cmd book.Command) error {
-	return e.send(ctx, request{cmd: cmd, enq: time.Now()})
+	if r := book.Validate(cmd); r != book.ReasonNone {
+		return fmt.Errorf("engine: invalid command: %s", r)
+	}
+	return e.send(ctx, request{cmd: cmd, enq: time.Now()}, true)
 }
 
 // Query runs fn on the engine goroutine, between commands, with exclusive
 // access to the book. fn must not retain the book or modify it.
 func (e *Engine) Query(ctx context.Context, fn func(*book.Book)) error {
 	reply := make(chan reply, 1)
-	if err := e.send(ctx, request{query: fn, reply: reply}); err != nil {
+	if err := e.send(ctx, request{query: fn, reply: reply}, true); err != nil {
 		return err
 	}
 	_, err := e.await(ctx, reply)
 	return err
 }
 
-func (e *Engine) send(ctx context.Context, r request) error {
+func (e *Engine) send(ctx context.Context, r request, wait bool) error {
 	if p := e.failure.Load(); p != nil {
 		return *p
 	}
@@ -286,6 +319,14 @@ func (e *Engine) send(ctx context.Context, r request) error {
 	case <-e.quit:
 		return ErrClosed
 	default:
+	}
+	if !wait {
+		select {
+		case e.in <- r:
+			return nil
+		default:
+			return ErrBusy
+		}
 	}
 	select {
 	case e.in <- r:

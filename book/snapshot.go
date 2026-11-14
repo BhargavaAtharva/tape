@@ -82,6 +82,10 @@ func Restore(data []byte) (*Book, error) {
 	b := New(0)
 	b.seq = le.Uint64(data[8:])
 	b.nextID = le.Uint64(data[16:])
+	if b.nextID == 0 {
+		return nil, fmt.Errorf("%w: zero id counter", ErrBadSnapshot)
+	}
+	b.idLimit = (b.nextID-1)>>OrderIDBits<<OrderIDBits + maxOrderID
 	nBids := int(le.Uint32(data[24:]))
 	nAsks := int(le.Uint32(data[28:]))
 	body := data[snapshotHeader:]

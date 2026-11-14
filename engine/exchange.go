@@ -3,13 +3,15 @@ package engine
 import (
 	"errors"
 	"fmt"
+
+	"github.com/BhargavaAtharva/tape/book"
 )
 
 // idShift leaves 40 bits for the per-symbol order counter. With the symbol
 // number above it, ids for up to 8191 symbols stay below 2^53 and survive a
 // round trip through a JSON number.
 const (
-	idShift    = 40
+	idShift    = book.OrderIDBits
 	MaxSymbols = 1<<13 - 1
 )
 

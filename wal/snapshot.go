@@ -93,23 +93,26 @@ func ListSnapshots(dir string) ([]uint64, error) {
 	return out, nil
 }
 
-// LoadSnapshot returns the newest snapshot that passes its checksum, trying
-// older ones if newer ones are damaged. With no usable snapshot it returns
-// index 0 and nil state.
-func LoadSnapshot(dir string) (index uint64, state []byte, err error) {
+// LoadSnapshot hands the newest snapshot that passes its checksum to use.
+// If the snapshot is damaged, or use rejects it, it tries the next older
+// one. It returns the index of the snapshot that was used, or 0 if none was.
+func LoadSnapshot(dir string, use func(state []byte) error) (uint64, error) {
 	indexes, err := ListSnapshots(dir)
 	if err != nil {
-		return 0, nil, err
+		return 0, err
 	}
 	for i := len(indexes) - 1; i >= 0; i-- {
 		state, err := readSnapshot(dir, indexes[i])
+		if err == nil {
+			err = use(state)
+		}
 		if err != nil {
 			slog.Warn("snapshot unusable, trying an older one", "index", indexes[i], "cause", err)
 			continue
 		}
-		return indexes[i], state, nil
+		return indexes[i], nil
 	}
-	return 0, nil, nil
+	return 0, nil
 }
 
 func readSnapshot(dir string, index uint64) ([]byte, error) {

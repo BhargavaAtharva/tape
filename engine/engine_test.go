@@ -340,3 +340,35 @@ func TestEngineExpiresOrdersFromItsTimer(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+func TestStaticallyInvalidCommandsAreNotLogged(t *testing.T) {
+	var sink collector
+	e := startEngine(t, Config{Symbol: "X", Events: sink.add, Dir: t.TempDir()})
+	res, err := e.Submit(context.Background(), book.Command{Kind: book.CmdNew, Trader: 1, Side: book.Buy, Type: book.Limit, TIF: book.GTC, Price: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev := res.Events[0]; ev.Kind != book.EvRejected || ev.Reason != book.ReasonInvalidQty || ev.Seq != 0 {
+		t.Fatalf("rejection %+v", ev)
+	}
+	if _, err := e.Submit(context.Background(), limit(1, book.Buy, 100, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if st := e.Stats(); st.WALWritten != 1 || st.Seq != 2 {
+		t.Fatalf("stats %+v: the invalid command reached the log", st)
+	}
+}
+
+func TestTrySubmitFailsFastWhenTheQueueIsFull(t *testing.T) {
+	e, err := Open(Config{Symbol: "X", QueueSize: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	if err := e.Enqueue(context.Background(), limit(1, book.Buy, 100, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.TrySubmit(context.Background(), limit(1, book.Buy, 100, 1)); !errors.Is(err, ErrBusy) {
+		t.Fatalf("TrySubmit on a full queue: %v", err)
+	}
+}

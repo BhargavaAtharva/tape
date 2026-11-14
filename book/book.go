@@ -10,10 +10,11 @@ type Book struct {
 	// for listing one trader's orders without scanning the book.
 	traders map[uint64]traderOrders
 
-	seq    uint64
-	nextID uint64
-	now    int64
-	events []Event
+	seq     uint64
+	nextID  uint64
+	idLimit uint64
+	now     int64
+	events  []Event
 
 	expiry expiryHeap
 
@@ -32,6 +33,7 @@ func New(idBase uint64) *Book {
 		orders:  make(map[uint64]*Order),
 		traders: make(map[uint64]traderOrders),
 		nextID:  idBase + 1,
+		idLimit: idBase + maxOrderID,
 	}
 }
 
@@ -179,6 +181,33 @@ func (b *Book) delta(s Side, lv *level) {
 	b.emit(Event{Kind: EvBookDelta, Side: s, Price: lv.price, Qty: lv.qty})
 }
 
+// Validate reports why a command would be rejected whatever the state of
+// the book, or ReasonNone. CmdExpire is invalid here because only the engine
+// issues it.
+func Validate(c Command) Reason {
+	switch c.Kind {
+	case CmdNew:
+		return validateNew(c)
+	case CmdCancel, CmdAmend:
+		switch {
+		case c.Trader == 0:
+			return ReasonInvalidTrader
+		case c.OrderID == 0:
+			return ReasonUnknownOrder
+		case c.Kind == CmdCancel:
+			return ReasonNone
+		case c.Price < 0 || c.Price > MaxPrice:
+			return ReasonInvalidPrice
+		case c.Qty < 0 || c.Qty > MaxQty:
+			return ReasonInvalidQty
+		case c.Price == 0 && c.Qty == 0:
+			return ReasonNoChange
+		}
+		return ReasonNone
+	}
+	return ReasonInvalidCommand
+}
+
 func validateNew(c Command) Reason {
 	switch {
 	case c.Trader == 0:
@@ -244,6 +273,10 @@ func (b *Book) newOrder(c Command) {
 	}
 	if c.PostOnly && b.wouldCross(&t) {
 		b.reject(0, c.Trader, ReasonWouldCross)
+		return
+	}
+	if b.nextID > b.idLimit {
+		b.reject(0, c.Trader, ReasonIDsExhausted)
 		return
 	}
 	t.id = b.nextID

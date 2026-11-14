@@ -55,7 +55,7 @@ func genCommands(seed uint64, n int) []book.Command {
 		case r < 87:
 			cmds = append(cmds, book.Command{Kind: book.CmdCancel, Trader: trader, OrderID: target()})
 		default:
-			c := book.Command{Kind: book.CmdAmend, Trader: trader, OrderID: target(), Qty: rng.Int64N(40)}
+			c := book.Command{Kind: book.CmdAmend, Trader: trader, OrderID: target(), Qty: 1 + rng.Int64N(40)}
 			if rng.IntN(2) == 0 {
 				c.Price = 990 + rng.Int64N(21)
 			}
