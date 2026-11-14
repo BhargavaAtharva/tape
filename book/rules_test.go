@@ -420,3 +420,48 @@ func TestOpenOrderCap(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Amend quantities are totals. An order of 10 that has filled 6 and is
+// amended to 8 has 2 left open, and keeps its place because that is a
+// reduction; amended to 5, less than has filled, it is finished.
+func TestAmendQuantityIsTotalIncludingFills(t *testing.T) {
+	b := New(0)
+	b.Apply(limit(1, Buy, 100, 10))
+	b.Apply(limit(2, Buy, 100, 10))
+	b.Apply(limit(3, Sell, 100, 6))
+	evs := b.Apply(amend(1, 1, 0, 8))
+	if evs[0].Kind != EvAmended || evs[0].Qty != 2 {
+		t.Fatalf("amend to total 8: %+v", evs)
+	}
+	if o := b.Order(1); o.Qty != 2 || o.Filled != 6 {
+		t.Fatalf("order after amend: %+v", o)
+	}
+	evs = b.Apply(limit(3, Sell, 100, 1))
+	if f, _ := lastEvent(evs, EvFill); f.MakerOrderID != 1 {
+		t.Fatalf("amended order lost its priority: %+v", f)
+	}
+
+	b = New(0)
+	b.Apply(limit(1, Buy, 99, 10))
+	b.Apply(limit(3, Sell, 99, 6))
+	evs = b.Apply(amend(1, 1, 0, 5))
+	if evs[0].Kind != EvCancelled || evs[0].Reason != ReasonAmendedToFilled || evs[0].Qty != 4 || b.Order(1) != nil {
+		t.Fatalf("amend below filled: %+v", evs)
+	}
+	if err := checkInvariants(b); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFilledSurvivesSnapshot(t *testing.T) {
+	b := New(0)
+	b.Apply(limit(1, Buy, 100, 10))
+	b.Apply(limit(2, Sell, 100, 4))
+	r, err := Restore(b.AppendSnapshot(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o := r.Order(1); o == nil || o.Filled != 4 || o.Qty != 6 {
+		t.Fatalf("restored order %+v", o)
+	}
+}

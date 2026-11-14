@@ -208,6 +208,7 @@ type taker struct {
 	market bool
 	limit  int64
 	qty    int64
+	filled int64
 }
 
 func (t *taker) crosses(price int64) bool {
@@ -313,8 +314,10 @@ func (b *Book) match(t *taker) (selfTrade bool) {
 			}
 			q := min(t.qty, m.Qty)
 			m.Qty -= q
+			m.Filled += q
 			lv.qty -= q
 			t.qty -= q
+			t.filled += q
 			b.emit(Event{
 				Kind: EvFill, Side: t.side, OrderID: t.id, Trader: t.trader,
 				MakerOrderID: m.ID, MakerTrader: m.Trader,
@@ -357,7 +360,7 @@ func (b *Book) freeOrder(o *Order) {
 // rest adds the remainder of a taker to the book as a resting order.
 func (b *Book) rest(t *taker, postOnly bool) {
 	o := b.allocOrder()
-	o.ID, o.Trader, o.Price, o.Qty, o.Side, o.PostOnly = t.id, t.trader, t.limit, t.qty, t.side, postOnly
+	o.ID, o.Trader, o.Price, o.Qty, o.Filled, o.Side, o.PostOnly = t.id, t.trader, t.limit, t.qty, t.filled, t.side, postOnly
 	lv := b.side(o.Side).getOrCreate(o.Price)
 	lv.pushBack(o)
 	b.index(o)
@@ -390,7 +393,7 @@ func (b *Book) remove(o *Order) {
 	}
 }
 
-// amend changes the price and/or open quantity of a resting order. Reducing
+// amend changes the price and/or total quantity of a resting order. Reducing
 // the quantity at the same price keeps the order's place in the queue. Any
 // other change takes the order out and re-enters it as a new arrival: it goes
 // to the back of its level and, if the new price crosses, trades as a taker.
@@ -404,41 +407,46 @@ func (b *Book) amend(c Command) {
 		b.reject(c.OrderID, c.Trader, ReasonNotOwner)
 		return
 	}
-	price, qty := c.Price, c.Qty
+	price, total := c.Price, c.Qty
 	if price == 0 {
 		price = o.Price
 	}
-	if qty == 0 {
-		qty = o.Qty
+	if total == 0 {
+		total = o.Qty + o.Filled
 	}
 	switch {
 	case price < 0 || price > MaxPrice:
 		b.reject(c.OrderID, c.Trader, ReasonInvalidPrice)
 		return
-	case qty < 0 || qty > MaxQty:
+	case total < 0 || total > MaxQty:
 		b.reject(c.OrderID, c.Trader, ReasonInvalidQty)
 		return
-	case price == o.Price && qty == o.Qty:
+	}
+	open := total - o.Filled
+	switch {
+	case open <= 0:
+		b.emit(Event{Kind: EvCancelled, OrderID: o.ID, Trader: o.Trader, Side: o.Side, Price: o.Price, Qty: o.Qty, Reason: ReasonAmendedToFilled})
+		b.remove(o)
+		return
+	case price == o.Price && open == o.Qty:
 		b.reject(c.OrderID, c.Trader, ReasonNoChange)
 		return
-	}
-
-	if price == o.Price && qty < o.Qty {
+	case price == o.Price && open < o.Qty:
 		lv := o.level
-		lv.qty -= o.Qty - qty
-		o.Qty = qty
-		b.emit(Event{Kind: EvAmended, OrderID: o.ID, Trader: o.Trader, Side: o.Side, Price: price, Qty: qty})
+		lv.qty -= o.Qty - open
+		o.Qty = open
+		b.emit(Event{Kind: EvAmended, OrderID: o.ID, Trader: o.Trader, Side: o.Side, Price: price, Qty: open})
 		b.delta(o.Side, lv)
 		return
 	}
 
-	t := taker{id: o.ID, trader: o.Trader, side: o.Side, limit: price, qty: qty}
+	t := taker{id: o.ID, trader: o.Trader, side: o.Side, limit: price, qty: open, filled: o.Filled}
 	if o.PostOnly && b.wouldCross(&t) {
 		b.reject(c.OrderID, c.Trader, ReasonWouldCross)
 		return
 	}
 	postOnly := o.PostOnly
-	b.emit(Event{Kind: EvAmended, OrderID: o.ID, Trader: o.Trader, Side: o.Side, Price: price, Qty: qty})
+	b.emit(Event{Kind: EvAmended, OrderID: o.ID, Trader: o.Trader, Side: o.Side, Price: price, Qty: open})
 	b.remove(o)
 	selfTrade := b.match(&t)
 	switch {

@@ -9,9 +9,9 @@ import (
 
 const (
 	snapshotMagic   = 0x4b425054 // "TPBK" little-endian
-	snapshotVersion = 1
+	snapshotVersion = 2
 	snapshotHeader  = 4 + 4 + 8 + 8 + 4 + 4
-	snapshotOrder   = 8 + 8 + 8 + 8 + 1
+	snapshotOrder   = 8 + 8 + 8 + 8 + 8 + 1
 )
 
 var ErrBadSnapshot = errors.New("book: malformed snapshot")
@@ -49,6 +49,7 @@ func appendSide(dst []byte, s *side) []byte {
 			dst = le.AppendUint64(dst, o.Trader)
 			dst = le.AppendUint64(dst, uint64(o.Price))
 			dst = le.AppendUint64(dst, uint64(o.Qty))
+			dst = le.AppendUint64(dst, uint64(o.Filled))
 			var flags byte
 			if o.PostOnly {
 				flags = 1
@@ -108,11 +109,12 @@ func (b *Book) restoreSide(sd Side, data []byte) error {
 			Trader:   le.Uint64(data[8:]),
 			Price:    int64(le.Uint64(data[16:])),
 			Qty:      int64(le.Uint64(data[24:])),
+			Filled:   int64(le.Uint64(data[32:])),
 			Side:     sd,
-			PostOnly: data[32]&1 != 0,
+			PostOnly: data[40]&1 != 0,
 		}
 		switch {
-		case o.Price <= 0 || o.Price > MaxPrice, o.Qty <= 0 || o.Qty > MaxQty, o.Trader == 0:
+		case o.Price <= 0 || o.Price > MaxPrice, o.Qty <= 0 || o.Qty > MaxQty, o.Filled < 0 || o.Filled > MaxQty, o.Trader == 0:
 			return fmt.Errorf("%w: order %d has invalid fields", ErrBadSnapshot, o.ID)
 		case o.ID >= b.nextID:
 			return fmt.Errorf("%w: order %d is beyond the id counter", ErrBadSnapshot, o.ID)

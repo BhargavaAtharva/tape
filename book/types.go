@@ -61,7 +61,12 @@ const MaxOpenOrders = 200
 //
 // For CmdNew the book assigns the order id. For CmdCancel and CmdAmend,
 // OrderID names the target. In an amend, a zero Price or Qty means
-// "leave unchanged" and Qty is the new open quantity.
+// "leave unchanged" and Qty is the new total quantity of the order,
+// including what has already filled, as in a FIX cancel/replace. Total
+// semantics make an amend safe to send while fills are in flight: a client
+// that asks for "10 in total" never ends up with more than 10, however much
+// traded in between. If the new total does not exceed what has filled, the
+// rest of the order is cancelled.
 type Command struct {
 	Kind     CommandKind
 	Side     Side
@@ -127,6 +132,7 @@ const (
 	ReasonNoLiquidity
 	ReasonSelfTrade
 	ReasonTooManyOrders
+	ReasonAmendedToFilled
 )
 
 var reasonNames = [...]string{
@@ -149,6 +155,7 @@ var reasonNames = [...]string{
 	ReasonNoLiquidity:     "no_liquidity",
 	ReasonSelfTrade:       "self_trade",
 	ReasonTooManyOrders:   "too_many_open_orders",
+	ReasonAmendedToFilled: "amended_below_filled",
 }
 
 func (r Reason) String() string {

@@ -348,7 +348,7 @@ func TestSlowConsumerIsDroppedOthersUnaffected(t *testing.T) {
 				if i%10 == 9 {
 					price = 10000
 				}
-				c := book.Command{Kind: book.CmdNew, Type: book.Limit, TIF: book.GTC, Trader: uint64(w + 1), Side: side, Price: price, Qty: int64(1 + i%30)}
+				c := book.Command{Kind: book.CmdNew, Type: book.Limit, TIF: book.GTC, Trader: uint64(1 + w + 4*(i%250)), Side: side, Price: price, Qty: int64(1 + i%30)}
 				if _, err := e.Submit(ctx, c); err != nil {
 					t.Error(err)
 					return
