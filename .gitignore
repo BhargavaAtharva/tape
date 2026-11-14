@@ -1,0 +1,10 @@
+/bin/
+/data/
+node_modules/
+dist/
+*.test
+*.prof
+*.out
+.env
+.DS_Store
+testdata/fuzz/
