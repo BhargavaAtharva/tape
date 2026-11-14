@@ -78,6 +78,8 @@ func (b *Book) Apply(c Command) []Event {
 		b.newOrder(c)
 	case CmdCancel:
 		b.cancel(c)
+	case CmdAmend:
+		b.amend(c)
 	default:
 		b.reject(c.OrderID, c.Trader, ReasonInvalidCommand)
 	}
@@ -113,6 +115,12 @@ func validateNew(c Command) Reason {
 		return ReasonInvalidPrice
 	case c.Type == Market && c.Price != 0:
 		return ReasonInvalidPrice
+	case c.TIF != GTC && c.TIF != IOC && c.TIF != FOK:
+		return ReasonInvalidTIF
+	case c.Type == Market && c.TIF == GTC:
+		return ReasonInvalidTIF
+	case c.PostOnly && (c.Type != Limit || c.TIF != GTC):
+		return ReasonInvalidPostOnly
 	}
 	return ReasonNone
 }
@@ -143,26 +151,71 @@ func (b *Book) newOrder(c Command) {
 		b.reject(0, c.Trader, r)
 		return
 	}
-	id := b.nextID
+	t := taker{trader: c.Trader, side: c.Side, market: c.Type == Market, limit: c.Price, qty: c.Qty}
+	if c.PostOnly && b.wouldCross(&t) {
+		b.reject(0, c.Trader, ReasonWouldCross)
+		return
+	}
+	t.id = b.nextID
 	b.nextID++
-	b.emit(Event{Kind: EvAccepted, OrderID: id, Trader: c.Trader, Side: c.Side, Price: c.Price, Qty: c.Qty})
+	b.emit(Event{Kind: EvAccepted, OrderID: t.id, Trader: c.Trader, Side: c.Side, Price: c.Price, Qty: c.Qty})
 
-	t := taker{id: id, trader: c.Trader, side: c.Side, market: c.Type == Market, limit: c.Price, qty: c.Qty}
-	b.match(&t)
-	if t.qty == 0 {
+	if c.TIF == FOK && !b.fillable(&t) {
+		b.cancelTaker(&t, ReasonFOK)
 		return
 	}
-	if t.market {
-		b.emit(Event{Kind: EvCancelled, OrderID: id, Trader: c.Trader, Side: c.Side, Qty: t.qty, Reason: ReasonNoLiquidity})
-		return
+	selfTrade := b.match(&t)
+	switch {
+	case t.qty == 0:
+	case selfTrade:
+		b.cancelTaker(&t, ReasonSelfTrade)
+	case t.market:
+		b.cancelTaker(&t, ReasonNoLiquidity)
+	case c.TIF == IOC:
+		b.cancelTaker(&t, ReasonIOC)
+	default:
+		b.rest(&Order{ID: t.id, Trader: t.trader, Price: t.limit, Qty: t.qty, Side: t.side, PostOnly: c.PostOnly})
 	}
-	b.rest(&Order{ID: id, Trader: c.Trader, Price: c.Price, Qty: t.qty, Side: c.Side})
+}
+
+func (b *Book) cancelTaker(t *taker, r Reason) {
+	b.emit(Event{Kind: EvCancelled, OrderID: t.id, Trader: t.trader, Side: t.side, Price: t.limit, Qty: t.qty, Reason: r})
+}
+
+func (b *Book) wouldCross(t *taker) bool {
+	lv := b.opposite(t.side).best
+	return lv != nil && t.crosses(lv.price)
+}
+
+// fillable reports whether match would fill the taker completely. It has to
+// look at individual orders rather than level totals because an order from
+// the same trader stops matching (self-trade prevention), which would leave
+// a fill-or-kill order partly filled.
+func (b *Book) fillable(t *taker) bool {
+	need := t.qty
+	for lv := b.opposite(t.side).best; lv != nil && t.crosses(lv.price); lv = lv.next {
+		for o := lv.head; o != nil; o = o.next {
+			if o.Trader == t.trader {
+				return false
+			}
+			need -= o.Qty
+			if need <= 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // match trades the taker against the opposite side, best price first and
 // oldest order first within a price. Every trade happens at the maker's
 // price. One BookDelta is emitted per level touched, after its fills.
-func (b *Book) match(t *taker) {
+//
+// Self-trade prevention is cancel-newest: when the next maker in line belongs
+// to the taker's own trader, matching stops and match returns true so the
+// caller cancels what is left of the taker. Fills made before that stand, and
+// the resting order is untouched.
+func (b *Book) match(t *taker) (selfTrade bool) {
 	opp := b.opposite(t.side)
 	makerSide := Sell
 	if t.side == Sell {
@@ -171,10 +224,15 @@ func (b *Book) match(t *taker) {
 	for t.qty > 0 {
 		lv := opp.best
 		if lv == nil || !t.crosses(lv.price) {
-			return
+			return false
 		}
+		before := lv.qty
 		for t.qty > 0 && lv.head != nil {
 			m := lv.head
+			if m.Trader == t.trader {
+				selfTrade = true
+				break
+			}
 			q := min(t.qty, m.Qty)
 			m.Qty -= q
 			lv.qty -= q
@@ -189,11 +247,17 @@ func (b *Book) match(t *taker) {
 				delete(b.orders, m.ID)
 			}
 		}
-		b.delta(makerSide, lv)
+		if lv.qty != before {
+			b.delta(makerSide, lv)
+		}
 		if lv.head == nil {
 			opp.remove(lv)
 		}
+		if selfTrade {
+			return true
+		}
 	}
+	return false
 }
 
 func (b *Book) rest(o *Order) {
@@ -225,5 +289,65 @@ func (b *Book) remove(o *Order) {
 	b.delta(o.Side, lv)
 	if lv.head == nil {
 		s.remove(lv)
+	}
+}
+
+// amend changes the price and/or open quantity of a resting order. Reducing
+// the quantity at the same price keeps the order's place in the queue. Any
+// other change takes the order out and re-enters it as a new arrival: it goes
+// to the back of its level and, if the new price crosses, trades as a taker.
+func (b *Book) amend(c Command) {
+	o := b.orders[c.OrderID]
+	if o == nil {
+		b.reject(c.OrderID, c.Trader, ReasonUnknownOrder)
+		return
+	}
+	if o.Trader != c.Trader {
+		b.reject(c.OrderID, c.Trader, ReasonNotOwner)
+		return
+	}
+	price, qty := c.Price, c.Qty
+	if price == 0 {
+		price = o.Price
+	}
+	if qty == 0 {
+		qty = o.Qty
+	}
+	switch {
+	case price < 0 || price > MaxPrice:
+		b.reject(c.OrderID, c.Trader, ReasonInvalidPrice)
+		return
+	case qty < 0 || qty > MaxQty:
+		b.reject(c.OrderID, c.Trader, ReasonInvalidQty)
+		return
+	case price == o.Price && qty == o.Qty:
+		b.reject(c.OrderID, c.Trader, ReasonNoChange)
+		return
+	}
+
+	if price == o.Price && qty < o.Qty {
+		lv := o.level
+		lv.qty -= o.Qty - qty
+		o.Qty = qty
+		b.emit(Event{Kind: EvAmended, OrderID: o.ID, Trader: o.Trader, Side: o.Side, Price: price, Qty: qty})
+		b.delta(o.Side, lv)
+		return
+	}
+
+	t := taker{id: o.ID, trader: o.Trader, side: o.Side, limit: price, qty: qty}
+	if o.PostOnly && b.wouldCross(&t) {
+		b.reject(c.OrderID, c.Trader, ReasonWouldCross)
+		return
+	}
+	postOnly := o.PostOnly
+	b.emit(Event{Kind: EvAmended, OrderID: o.ID, Trader: o.Trader, Side: o.Side, Price: price, Qty: qty})
+	b.remove(o)
+	selfTrade := b.match(&t)
+	switch {
+	case t.qty == 0:
+	case selfTrade:
+		b.cancelTaker(&t, ReasonSelfTrade)
+	default:
+		b.rest(&Order{ID: t.id, Trader: t.trader, Price: t.limit, Qty: t.qty, Side: t.side, PostOnly: postOnly})
 	}
 }
