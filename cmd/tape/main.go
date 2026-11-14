@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -175,8 +176,14 @@ func run() error {
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
+	ln, err := net.Listen("tcp", cfg.addr)
+	if err != nil {
+		shutdownSim()
+		st.Close()
+		return err
+	}
 	errc := make(chan error, 1)
-	go func() { errc <- srv.ListenAndServe() }()
+	go func() { errc <- srv.Serve(ln) }()
 	slog.Info("listening", "addr", cfg.addr, "symbols", len(cfg.symbols), "wal", durability, "data", cfg.dataDir, "sim", cfg.sim)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
