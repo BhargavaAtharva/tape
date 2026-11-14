@@ -42,6 +42,10 @@ const (
 	CmdNew    CommandKind = 1
 	CmdCancel CommandKind = 2
 	CmdAmend  CommandKind = 3
+	// CmdExpire cancels every resting order whose time to live has run out
+	// by the command's Time. The engine issues it from a timer and logs it
+	// like any other command, so expiry replays identically.
+	CmdExpire CommandKind = 4
 )
 
 // Prices are integer ticks and quantities integer lots. The caps keep a
@@ -78,6 +82,9 @@ type Command struct {
 	Trader   uint64
 	Price    int64
 	Qty      int64
+	// TTL, for a GTC order, is how long it may rest, in nanoseconds of
+	// command time. Zero means until cancelled.
+	TTL int64
 }
 
 type EventKind uint8
@@ -133,6 +140,8 @@ const (
 	ReasonSelfTrade
 	ReasonTooManyOrders
 	ReasonAmendedToFilled
+	ReasonInvalidTTL
+	ReasonExpired
 )
 
 var reasonNames = [...]string{
@@ -156,6 +165,8 @@ var reasonNames = [...]string{
 	ReasonSelfTrade:       "self_trade",
 	ReasonTooManyOrders:   "too_many_open_orders",
 	ReasonAmendedToFilled: "amended_below_filled",
+	ReasonInvalidTTL:      "invalid_ttl",
+	ReasonExpired:         "expired",
 }
 
 func (r Reason) String() string {

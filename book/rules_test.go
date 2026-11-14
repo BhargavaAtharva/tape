@@ -465,3 +465,53 @@ func TestFilledSurvivesSnapshot(t *testing.T) {
 		t.Fatalf("restored order %+v", o)
 	}
 }
+
+func TestOrdersExpireAfterTheirTTL(t *testing.T) {
+	b := New(0)
+	at := func(c Command, t int64) Command { c.Time = t; return c }
+	withTTL := func(c Command, ttl int64) Command { c.TTL = ttl; return c }
+
+	b.Apply(at(withTTL(limit(1, Buy, 100, 5), 10), 0))  // id 1, expires at 10
+	b.Apply(at(withTTL(limit(2, Buy, 99, 5), 5), 1))    // id 2, expires at 6
+	b.Apply(at(withTTL(limit(3, Sell, 105, 5), 20), 2)) // id 3, expires at 22
+	b.Apply(at(limit(4, Sell, 106, 5), 2))              // id 4, never expires
+	b.Apply(at(amend(1, 1, 101, 0), 3))                 // re-entered, keeps its expiry
+	b.Apply(at(limit(5, Sell, 101, 2), 4))              // partly fills id 1
+
+	if at, ok := b.NextExpiry(); !ok || at != 6 {
+		t.Fatalf("next expiry %d %v, want 6", at, ok)
+	}
+	if evs := b.Apply(Command{Kind: CmdExpire, Time: 5}); len(evs) != 0 {
+		t.Fatalf("expired early: %+v", evs)
+	}
+	evs := b.Apply(Command{Kind: CmdExpire, Time: 10})
+	var expired []uint64
+	for _, e := range evs {
+		if e.Kind == EvCancelled {
+			if e.Reason != ReasonExpired {
+				t.Fatalf("cancel reason %v", e.Reason)
+			}
+			expired = append(expired, e.OrderID)
+		}
+	}
+	if len(expired) != 2 || expired[0] != 2 || expired[1] != 1 {
+		t.Fatalf("expired %v, want [2 1] in expiry order", expired)
+	}
+	r, err := Restore(b.AppendSnapshot(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if at, ok := r.NextExpiry(); !ok || at != 22 {
+		t.Fatalf("restored next expiry %d %v", at, ok)
+	}
+	r.Apply(Command{Kind: CmdExpire, Time: 100})
+	if r.Len() != 1 || r.Order(4) == nil {
+		t.Fatalf("after final expiry %d orders left", r.Len())
+	}
+	if _, ok := r.NextExpiry(); ok {
+		t.Fatal("expiry left after every expiring order is gone")
+	}
+	if evs := b.Apply(withTTL(ioc(1, Buy, 100, 1), 5)); evs[0].Reason != ReasonInvalidTTL {
+		t.Fatalf("TTL on IOC: %+v", evs[0])
+	}
+}

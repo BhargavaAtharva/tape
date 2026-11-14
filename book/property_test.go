@@ -85,6 +85,9 @@ func (l *ledger) setOpen(a *account, open int64) {
 
 func (l *ledger) observe(c Command, evs []Event) error {
 	if len(evs) == 0 {
+		if c.Kind == CmdExpire {
+			return nil
+		}
 		return fmt.Errorf("command produced no events")
 	}
 	// arriving is the order that entered (or re-entered) the market with this
@@ -275,6 +278,9 @@ func decode(p []byte, issued uint64) Command {
 		case 9:
 			c.Type, c.TIF, c.Price = Market, FOK, 0
 		}
+		if c.TIF == GTC && p[4]%3 == 0 {
+			c.TTL = 1 + int64(p[5]%40)
+		}
 		return c
 	case op < 16:
 		return Command{Kind: CmdCancel, Trader: trader, OrderID: target}
@@ -284,6 +290,8 @@ func decode(p []byte, issued uint64) Command {
 			c.Price = 90 + int64(p[3]%21)
 		}
 		return c
+	case p[1]%2 == 0:
+		return Command{Kind: CmdExpire}
 	default:
 		// Deliberately malformed: every field straight from the input.
 		return Command{

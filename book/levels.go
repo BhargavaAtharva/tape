@@ -3,11 +3,14 @@ package book
 // Order is a resting order. Qty is the open quantity and Filled what has
 // traded so far, so Qty+Filled is the order's total.
 type Order struct {
-	ID       uint64
-	Trader   uint64
-	Price    int64
-	Qty      int64
-	Filled   int64
+	ID     uint64
+	Trader uint64
+	Price  int64
+	Qty    int64
+	Filled int64
+	// ExpireAt is the command time after which the order is cancelled; zero
+	// means never.
+	ExpireAt int64
 	Side     Side
 	PostOnly bool
 

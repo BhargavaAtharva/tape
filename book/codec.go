@@ -7,9 +7,9 @@ import (
 )
 
 // CommandSize is the length of an encoded command.
-const CommandSize = 6 + 8*5
+const CommandSize = 6 + 8*6
 
-const commandVersion = 1
+const commandVersion = 2
 
 var ErrBadCommand = errors.New("book: malformed command record")
 
@@ -28,6 +28,7 @@ func AppendCommand(dst []byte, c Command) []byte {
 	dst = le.AppendUint64(dst, c.Trader)
 	dst = le.AppendUint64(dst, uint64(c.Price))
 	dst = le.AppendUint64(dst, uint64(c.Qty))
+	dst = le.AppendUint64(dst, uint64(c.TTL))
 	return dst
 }
 
@@ -53,5 +54,6 @@ func DecodeCommand(p []byte) (Command, error) {
 		Trader:   le.Uint64(p[22:]),
 		Price:    int64(le.Uint64(p[30:])),
 		Qty:      int64(le.Uint64(p[38:])),
+		TTL:      int64(le.Uint64(p[46:])),
 	}, nil
 }

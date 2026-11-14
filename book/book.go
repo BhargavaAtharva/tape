@@ -15,6 +15,8 @@ type Book struct {
 	now    int64
 	events []Event
 
+	expiry expiryHeap
+
 	// Resting orders (and, in each side, price levels) are recycled through
 	// free lists, so a book in steady state allocates nothing per command.
 	freeOrders *Order
@@ -154,6 +156,8 @@ func (b *Book) Apply(c Command) []Event {
 		b.cancel(c)
 	case CmdAmend:
 		b.amend(c)
+	case CmdExpire:
+		b.expire()
 	default:
 		b.reject(c.OrderID, c.Trader, ReasonInvalidCommand)
 	}
@@ -195,6 +199,8 @@ func validateNew(c Command) Reason {
 		return ReasonInvalidTIF
 	case c.PostOnly && (c.Type != Limit || c.TIF != GTC):
 		return ReasonInvalidPostOnly
+	case c.TTL < 0 || c.TTL > 0 && c.TIF != GTC:
+		return ReasonInvalidTTL
 	}
 	return ReasonNone
 }
@@ -209,6 +215,8 @@ type taker struct {
 	limit  int64
 	qty    int64
 	filled int64
+	// expireAt carries an order's expiry through an amend that re-enters it.
+	expireAt int64
 }
 
 func (t *taker) crosses(price int64) bool {
@@ -231,6 +239,9 @@ func (b *Book) newOrder(c Command) {
 		return
 	}
 	t := taker{trader: c.Trader, side: c.Side, market: c.Type == Market, limit: c.Price, qty: c.Qty}
+	if c.TTL > 0 {
+		t.expireAt = c.Time + c.TTL
+	}
 	if c.PostOnly && b.wouldCross(&t) {
 		b.reject(0, c.Trader, ReasonWouldCross)
 		return
@@ -254,6 +265,9 @@ func (b *Book) newOrder(c Command) {
 		b.cancelTaker(&t, ReasonIOC)
 	default:
 		b.rest(&t, c.PostOnly)
+		if t.expireAt > 0 {
+			b.expiry.push(expiryEntry{at: t.expireAt, id: t.id})
+		}
 	}
 }
 
@@ -361,6 +375,7 @@ func (b *Book) freeOrder(o *Order) {
 func (b *Book) rest(t *taker, postOnly bool) {
 	o := b.allocOrder()
 	o.ID, o.Trader, o.Price, o.Qty, o.Filled, o.Side, o.PostOnly = t.id, t.trader, t.limit, t.qty, t.filled, t.side, postOnly
+	o.ExpireAt = t.expireAt
 	lv := b.side(o.Side).getOrCreate(o.Price)
 	lv.pushBack(o)
 	b.index(o)
@@ -440,7 +455,7 @@ func (b *Book) amend(c Command) {
 		return
 	}
 
-	t := taker{id: o.ID, trader: o.Trader, side: o.Side, limit: price, qty: open, filled: o.Filled}
+	t := taker{id: o.ID, trader: o.Trader, side: o.Side, limit: price, qty: open, filled: o.Filled, expireAt: o.ExpireAt}
 	if o.PostOnly && b.wouldCross(&t) {
 		b.reject(c.OrderID, c.Trader, ReasonWouldCross)
 		return

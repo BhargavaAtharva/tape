@@ -42,6 +42,9 @@ type Config struct {
 	WAL wal.Options
 	// SnapshotEvery is the number of logged commands between snapshots.
 	SnapshotEvery uint64
+	// ExpiryCheck is how often the engine looks for orders whose time to
+	// live has run out.
+	ExpiryCheck time.Duration
 }
 
 func (c *Config) setDefaults() {
@@ -53,6 +56,9 @@ func (c *Config) setDefaults() {
 	}
 	if c.Clock == nil {
 		c.Clock = func() int64 { return time.Now().UnixNano() }
+	}
+	if c.ExpiryCheck <= 0 {
+		c.ExpiryCheck = time.Second
 	}
 	if c.SnapshotEvery == 0 {
 		c.SnapshotEvery = 50_000
@@ -313,6 +319,8 @@ func (e *Engine) run() {
 	defer close(e.done)
 	defer e.shutdown()
 	batch := make([]request, 0, e.cfg.MaxBatch)
+	expiry := time.NewTicker(e.cfg.ExpiryCheck)
+	defer expiry.Stop()
 	for {
 		select {
 		case r := <-e.in:
@@ -320,6 +328,14 @@ func (e *Engine) run() {
 		case s := <-e.snapDone:
 			e.snapshotWritten(s)
 			continue
+		case <-expiry.C:
+			// The clock is only read when something is due, so a book with
+			// no expiring orders logs nothing and consumes no timestamps.
+			at, ok := e.book.NextExpiry()
+			if !ok || at > e.cfg.Clock() {
+				continue
+			}
+			batch = append(batch[:0], request{cmd: book.Command{Kind: book.CmdExpire}})
 		case <-e.quit:
 			for {
 				batch = e.fill(batch[:0])
@@ -381,7 +397,9 @@ func (e *Engine) process(batch []request) bool {
 		if r.reply != nil {
 			r.reply <- reply{res: Result{Events: evs}}
 		}
-		e.latency.Record(int64(time.Since(r.enq)))
+		if !r.enq.IsZero() {
+			e.latency.Record(int64(time.Since(r.enq)))
+		}
 		e.commands.Add(1)
 	}
 	if len(out) == 0 {

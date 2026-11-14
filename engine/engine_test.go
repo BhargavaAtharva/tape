@@ -307,3 +307,36 @@ func TestClockStampsEvents(t *testing.T) {
 		}
 	}
 }
+
+func TestEngineExpiresOrdersFromItsTimer(t *testing.T) {
+	var now atomic.Int64
+	var sink collector
+	e := startEngine(t, Config{Symbol: "X", Events: sink.add, ExpiryCheck: time.Millisecond, Clock: func() int64 { return now.Load() }})
+	c := limit(1, book.Buy, 100, 5)
+	c.TTL = 1000
+	if _, err := e.Submit(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if events, _ := sink.snapshot(); len(events) != 2 {
+		t.Fatalf("%d events before the order was due", len(events))
+	}
+	now.Store(1000)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		events, gap := sink.snapshot()
+		if gap {
+			t.Fatal("sequence gap")
+		}
+		if last := events[len(events)-1]; last.Kind == book.EvBookDelta && len(events) == 4 {
+			if c := events[2]; c.Kind != book.EvCancelled || c.Reason != book.ReasonExpired || c.Time != 1000 {
+				t.Fatalf("expiry event %+v", c)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("order not expired: %+v", events)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
