@@ -9,6 +9,10 @@ type Book struct {
 	nextID uint64
 	now    int64
 	events []Event
+
+	// Resting orders (and, in each side, price levels) are recycled through
+	// free lists, so a book in steady state allocates nothing per command.
+	freeOrders *Order
 }
 
 // New returns an empty book. Order ids are assigned as idBase+1, idBase+2, ...
@@ -28,7 +32,8 @@ func (b *Book) Seq() uint64 { return b.seq }
 // Len is the number of resting orders.
 func (b *Book) Len() int { return len(b.orders) }
 
-// Order returns the resting order with the given id, or nil.
+// Order returns the resting order with the given id, or nil. The pointer is
+// only valid until the next Apply: orders that leave the book are recycled.
 func (b *Book) Order(id uint64) *Order { return b.orders[id] }
 
 func (b *Book) BestBid() (price, qty int64, ok bool) { return best(&b.bids) }
@@ -79,9 +84,10 @@ func (b *Book) opposite(s Side) *side {
 	return &b.bids
 }
 
-// Apply executes one command and returns the events it produced.
+// Apply executes one command and returns the events it produced. The slice
+// is reused by the next call; callers that keep events must copy them.
 func (b *Book) Apply(c Command) []Event {
-	b.events = nil
+	b.events = b.events[:0]
 	b.now = c.Time
 	switch c.Kind {
 	case CmdNew:
@@ -184,7 +190,7 @@ func (b *Book) newOrder(c Command) {
 	case c.TIF == IOC:
 		b.cancelTaker(&t, ReasonIOC)
 	default:
-		b.rest(&Order{ID: t.id, Trader: t.trader, Price: t.limit, Qty: t.qty, Side: t.side, PostOnly: c.PostOnly})
+		b.rest(&t, c.PostOnly)
 	}
 }
 
@@ -255,6 +261,7 @@ func (b *Book) match(t *taker) (selfTrade bool) {
 			if m.Qty == 0 {
 				lv.unlink(m)
 				delete(b.orders, m.ID)
+				b.freeOrder(m)
 			}
 		}
 		if lv.qty != before {
@@ -270,7 +277,25 @@ func (b *Book) match(t *taker) (selfTrade bool) {
 	return false
 }
 
-func (b *Book) rest(o *Order) {
+func (b *Book) allocOrder() *Order {
+	o := b.freeOrders
+	if o == nil {
+		return &Order{}
+	}
+	b.freeOrders = o.next
+	o.next = nil
+	return o
+}
+
+func (b *Book) freeOrder(o *Order) {
+	*o = Order{next: b.freeOrders}
+	b.freeOrders = o
+}
+
+// rest adds the remainder of a taker to the book as a resting order.
+func (b *Book) rest(t *taker, postOnly bool) {
+	o := b.allocOrder()
+	o.ID, o.Trader, o.Price, o.Qty, o.Side, o.PostOnly = t.id, t.trader, t.limit, t.qty, t.side, postOnly
 	lv := b.side(o.Side).getOrCreate(o.Price)
 	lv.pushBack(o)
 	b.orders[o.ID] = o
@@ -297,6 +322,7 @@ func (b *Book) remove(o *Order) {
 	lv.unlink(o)
 	delete(b.orders, o.ID)
 	b.delta(o.Side, lv)
+	b.freeOrder(o)
 	if lv.head == nil {
 		s.remove(lv)
 	}
@@ -358,6 +384,6 @@ func (b *Book) amend(c Command) {
 	case selfTrade:
 		b.cancelTaker(&t, ReasonSelfTrade)
 	default:
-		b.rest(&Order{ID: t.id, Trader: t.trader, Price: t.limit, Qty: t.qty, Side: t.side, PostOnly: postOnly})
+		b.rest(&t, postOnly)
 	}
 }

@@ -237,13 +237,23 @@ func (e *Engine) Close() error {
 	return e.closeErr
 }
 
+// replies recycles reply channels. A channel goes back only after its reply
+// has been received; one abandoned on a cancelled context may still be
+// written to by the engine and is left to the garbage collector.
+var replies = sync.Pool{New: func() any { return make(chan reply, 1) }}
+
 // Submit queues a command and waits for its result.
 func (e *Engine) Submit(ctx context.Context, cmd book.Command) (Result, error) {
-	reply := make(chan reply, 1)
-	if err := e.send(ctx, request{cmd: cmd, reply: reply, enq: time.Now()}); err != nil {
+	ch := replies.Get().(chan reply)
+	if err := e.send(ctx, request{cmd: cmd, reply: ch, enq: time.Now()}); err != nil {
+		replies.Put(ch)
 		return Result{}, err
 	}
-	return e.await(ctx, reply)
+	res, err := e.await(ctx, ch)
+	if ctx.Err() == nil {
+		replies.Put(ch)
+	}
+	return res, err
 }
 
 // Enqueue queues a command without waiting for the result.
@@ -354,7 +364,9 @@ func (e *Engine) process(batch []request) bool {
 			return false
 		}
 	}
-	var out []book.Event
+	// Sized for a typical command (accept, a fill or two, deltas) so the
+	// batch's events usually land in one allocation.
+	out := make([]book.Event, 0, 4*len(batch))
 	for i := range batch {
 		r := &batch[i]
 		if r.query != nil {
@@ -362,9 +374,10 @@ func (e *Engine) process(batch []request) bool {
 			r.reply <- reply{}
 			continue
 		}
-		evs := e.book.Apply(r.cmd)
+		start := len(out)
+		out = append(out, e.book.Apply(r.cmd)...)
+		evs := out[start:len(out):len(out)]
 		e.countFills(evs)
-		out = append(out, evs...)
 		if r.reply != nil {
 			r.reply <- reply{res: Result{Events: evs}}
 		}

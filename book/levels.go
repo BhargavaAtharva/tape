@@ -67,6 +67,7 @@ type side struct {
 	best *level
 	sign int64
 	n    int
+	free *level
 }
 
 func (s *side) find(price int64) *level {
@@ -107,7 +108,14 @@ func (s *side) getOrCreate(price int64) *level {
 			return n
 		}
 	}
-	lv := &level{price: price, key: key, prio: mix(uint64(price))}
+	lv := s.free
+	if lv != nil {
+		s.free = lv.next
+		*lv = level{}
+	} else {
+		lv = &level{}
+	}
+	lv.price, lv.key, lv.prio = price, key, mix(uint64(price))
 	lv.prev, lv.next = pred, succ
 	if pred != nil {
 		pred.next = lv
@@ -133,6 +141,8 @@ func (s *side) remove(lv *level) {
 	}
 	s.root = treapRemove(s.root, lv.key)
 	s.n--
+	*lv = level{next: s.free}
+	s.free = lv
 }
 
 // mix is the splitmix64 finalizer. Treap priorities are a hash of the price
