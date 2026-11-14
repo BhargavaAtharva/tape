@@ -7,4 +7,3 @@ dist/
 *.out
 .env
 .DS_Store
-testdata/fuzz/
