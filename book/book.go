@@ -1,5 +1,7 @@
 package book
 
+import "math/rand/v2"
+
 type Book struct {
 	bids   side
 	asks   side
@@ -18,9 +20,10 @@ type Book struct {
 // New returns an empty book. Order ids are assigned as idBase+1, idBase+2, ...
 // which lets a caller running several books give each a disjoint id range.
 func New(idBase uint64) *Book {
+	seed := rand.Uint64()
 	return &Book{
-		bids:   side{sign: -1},
-		asks:   side{sign: 1},
+		bids:   side{sign: -1, seed: seed},
+		asks:   side{sign: 1, seed: seed},
 		orders: make(map[uint64]*Order),
 		nextID: idBase + 1,
 	}

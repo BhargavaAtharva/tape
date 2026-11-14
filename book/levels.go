@@ -68,6 +68,8 @@ type side struct {
 	sign int64
 	n    int
 	free *level
+	// key for the treap priority hash; see mix.
+	seed uint64
 }
 
 func (s *side) getOrCreate(price int64) *level {
@@ -96,7 +98,7 @@ func (s *side) getOrCreate(price int64) *level {
 	} else {
 		lv = &level{}
 	}
-	lv.price, lv.key, lv.prio = price, key, mix(uint64(price))
+	lv.price, lv.key, lv.prio = price, key, mix(uint64(price)^s.seed)
 	lv.prev, lv.next = pred, succ
 	if pred != nil {
 		pred.next = lv
@@ -126,9 +128,11 @@ func (s *side) remove(lv *level) {
 	s.free = lv
 }
 
-// mix is the splitmix64 finalizer. Treap priorities are a hash of the price
-// rather than random draws, so the tree shape depends only on the set of
-// live prices and carries no RNG state that recovery would have to restore.
+// mix is the splitmix64 finalizer. A treap priority is mix(price ^ seed),
+// with a random seed per book. It needs no RNG state, and because the seed
+// is secret a client cannot choose prices that degrade the treap into a
+// list. The tree's shape never affects matching, so a recovered book with a
+// different seed still produces exactly the same events.
 func mix(x uint64) uint64 {
 	x += 0x9e3779b97f4a7c15
 	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
