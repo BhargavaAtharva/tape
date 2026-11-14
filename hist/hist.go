@@ -65,6 +65,13 @@ func (c *Counts) Sub(earlier *Counts) *Counts {
 	return &d
 }
 
+// Add merges other into c.
+func (c *Counts) Add(other *Counts) {
+	for i := range c {
+		c[i] += other[i]
+	}
+}
+
 func (c *Counts) Total() uint64 {
 	var n uint64
 	for _, v := range c {

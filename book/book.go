@@ -55,6 +55,16 @@ func (b *Book) Depth(s Side, max int) []Level {
 	return out
 }
 
+// Orders calls fn for every resting order on one side, best price first and
+// oldest first within a price. fn must not modify the book.
+func (b *Book) Orders(s Side, fn func(*Order)) {
+	for lv := b.side(s).best; lv != nil; lv = lv.next {
+		for o := lv.head; o != nil; o = o.next {
+			fn(o)
+		}
+	}
+}
+
 func (b *Book) side(s Side) *side {
 	if s == Buy {
 		return &b.bids

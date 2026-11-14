@@ -345,3 +345,15 @@ func TestOrderIDsStartAfterBase(t *testing.T) {
 		t.Fatalf("first id %d", evs[0].OrderID)
 	}
 }
+
+func TestOrdersIteratesInPriorityOrder(t *testing.T) {
+	b := New(0)
+	for _, c := range []Command{limit(1, Buy, 100, 1), limit(2, Buy, 101, 1), limit(3, Buy, 100, 1), limit(4, Sell, 105, 1)} {
+		b.Apply(c)
+	}
+	var ids []uint64
+	b.Orders(Buy, func(o *Order) { ids = append(ids, o.ID) })
+	if len(ids) != 3 || ids[0] != 2 || ids[1] != 1 || ids[2] != 3 {
+		t.Fatalf("bid order %v, want [2 1 3]", ids)
+	}
+}
