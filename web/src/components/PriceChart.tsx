@@ -74,6 +74,7 @@ export function PriceChart({ trades, version, scale }: Props) {
   const [scheme, setScheme] = useState(0);
 
   // The feed appends to trades in place, so version is what signals new data.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const data = useMemo(() => candles(trades, interval), [trades, version, interval]);
   const visible = Math.max(1, Math.floor((size.w - AXIS_W) / SLOT));
   const shown = data.slice(-visible);
