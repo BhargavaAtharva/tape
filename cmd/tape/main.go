@@ -40,6 +40,7 @@ type config struct {
 	feedInterval  time.Duration
 	sim           bool
 	simIntensity  float64
+	simSeed       uint64
 }
 
 func env(key, def string) string {
@@ -98,7 +99,13 @@ func loadConfig() (config, error) {
 	if c.sim, err = strconv.ParseBool(env("TAPE_SIM", "true")); err != nil {
 		return c, fmt.Errorf("TAPE_SIM: %w", err)
 	}
-	if c.simIntensity, err = strconv.ParseFloat(env("TAPE_SIM_INTENSITY", "1"), 64); err != nil {
+	if c.simSeed, err = strconv.ParseUint(env("TAPE_SIM_SEED", "0"), 10, 64); err != nil {
+		return c, fmt.Errorf("TAPE_SIM_SEED: %w", err)
+	}
+	if c.simSeed == 0 {
+		c.simSeed = uint64(time.Now().UnixNano())
+	}
+	if c.simIntensity, err = strconv.ParseFloat(env("TAPE_SIM_INTENSITY", "0.5"), 64); err != nil {
 		return c, fmt.Errorf("TAPE_SIM_INTENSITY: %w", err)
 	}
 	return c, nil
@@ -187,7 +194,7 @@ func run() error {
 		}
 		go func() {
 			defer close(simDone)
-			if err := sim.Run(simCtx, st.Exchange, sim.Config{Markets: markets, Intensity: cfg.simIntensity, Seed: uint64(time.Now().UnixNano())}); err != nil {
+			if err := sim.Run(simCtx, st.Exchange, sim.Config{Markets: markets, Intensity: cfg.simIntensity, Seed: cfg.simSeed}); err != nil {
 				slog.Error("simulator stopped", "err", err)
 			}
 		}()

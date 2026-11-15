@@ -52,7 +52,10 @@ type Config struct {
 	// Intensity scales how often takers trade and makers requote. At 1 each
 	// symbol sees a few dozen commands a second.
 	Intensity float64
-	Seed      uint64
+	// Seed drives every random choice the bots make. The order flow still
+	// depends on timing (ticks, other traders), so a seed reproduces the
+	// bots' decisions, not the exact command stream.
+	Seed uint64
 }
 
 // Run drives every market until ctx is done.
@@ -107,7 +110,7 @@ type market struct {
 func newMarket(e *engine.Engine, ref int64, intensity float64, seed uint64) *market {
 	m := &market{
 		e: e, ref: float64(ref), intensity: intensity,
-		rng:  rand.New(rand.NewPCG(seed, uint64(time.Now().UnixNano()))),
+		rng:  rand.New(rand.NewPCG(seed, 0x7a9e)),
 		tick: max(1, ref/10_000),
 	}
 	for i := range m.quotes {
