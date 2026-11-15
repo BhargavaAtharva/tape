@@ -16,6 +16,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -74,6 +75,11 @@ func main() {
 
 // submitter sends one order command and returns the id of the order if it
 // is left resting, so the worker can cancel it later.
+// rejections counts commands the engine refused (unknown order on a cancel
+// that lost a race with a fill, open-order cap, and so on). They are real
+// round trips but cheaper than accepted orders, so they are reported.
+var rejections atomic.Uint64
+
 type submitter func(ctx context.Context, symbol string, c book.Command) (resting uint64, err error)
 
 func run(o options) error {
@@ -102,7 +108,10 @@ func run(o options) error {
 		stop = x.Close
 		fmt.Printf("mode=engine wal_sync=%s data=%s\n", o.sync, dir)
 	case "http":
-		submit = httpSubmitter(o.url, o.workers*len(o.symbols))
+		var err error
+		if submit, err = httpSubmitter(o.url, o.workers*len(o.symbols)); err != nil {
+			return err
+		}
 		stop = func() error { return nil }
 		fmt.Printf("mode=http url=%s\n", o.url)
 	default:
@@ -166,7 +175,7 @@ func run(o options) error {
 	} else {
 		fmt.Printf("symbols=%d workers_per_symbol=%d duration=%s\n", len(o.symbols), o.workers, elapsed.Round(time.Millisecond))
 	}
-	fmt.Printf("commands=%d failures=%d throughput=%.0f/s\n", n, failures.Load(), float64(n)/elapsed.Seconds())
+	fmt.Printf("commands=%d engine_rejections=%d failures=%d throughput=%.0f/s\n", n, rejections.Load(), failures.Load(), float64(n)/elapsed.Seconds())
 	fmt.Printf("latency p50=%s p99=%s p99.9=%s\n", dur(c.Quantile(0.5)), dur(c.Quantile(0.99)), dur(c.Quantile(0.999)))
 	if p := firstErr.Load(); p != nil {
 		fmt.Printf("first error: %v\n", *p)
@@ -179,7 +188,9 @@ func dur(ns int64) string { return time.Duration(ns).String() }
 // nextCommand produces the order flow: limit orders around a fixed mid,
 // some marketable, and cancels of the worker's own resting orders.
 func nextCommand(rng *rand.Rand, trader uint64, resting *[]uint64) book.Command {
-	if r := *resting; len(r) > 0 && rng.IntN(100) < 30 {
+	// Cancelling whenever 100 are outstanding keeps every trader under the
+	// book's open-order cap, so the load is not padded with cheap rejects.
+	if r := *resting; len(r) >= 100 || len(r) > 0 && rng.IntN(100) < 30 {
 		k := rng.IntN(len(r))
 		id := r[k]
 		r[k] = r[len(r)-1]
@@ -208,6 +219,9 @@ func engineSubmitter(x *engine.Exchange) submitter {
 		if err != nil {
 			return 0, err
 		}
+		if len(res.Events) > 0 && res.Events[0].Kind == book.EvRejected {
+			rejections.Add(1)
+		}
 		return restingID(res.Events), nil
 	}
 }
@@ -229,10 +243,38 @@ func restingID(evs []book.Event) uint64 {
 	return 0
 }
 
-func httpSubmitter(base string, conns int) submitter {
+// centres asks the server for each symbol's reference price, so that the
+// generated prices, which are offsets around 100000, land inside the
+// server's price band instead of being refused by its risk checks.
+func centres(client *http.Client, base string) (map[string]int64, error) {
+	resp, err := client.Get(base + "/v1/symbols")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var syms []struct {
+		Symbol    string `json:"symbol"`
+		Reference int64  `json:"reference"`
+		Last      int64  `json:"last"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&syms); err != nil {
+		return nil, fmt.Errorf("reading symbols: %w", err)
+	}
+	out := make(map[string]int64, len(syms))
+	for _, s := range syms {
+		out[s.Symbol] = cmp.Or(s.Last, s.Reference, 100_000)
+	}
+	return out, nil
+}
+
+func httpSubmitter(base string, conns int) (submitter, error) {
 	client := &http.Client{
 		Timeout:   10 * time.Second,
 		Transport: &http.Transport{MaxIdleConns: conns, MaxIdleConnsPerHost: conns, MaxConnsPerHost: conns},
+	}
+	mid, err := centres(client, base)
+	if err != nil {
+		return nil, err
 	}
 	sides := map[book.Side]string{book.Buy: "buy", book.Sell: "sell"}
 	return func(ctx context.Context, symbol string, c book.Command) (uint64, error) {
@@ -245,7 +287,7 @@ func httpSubmitter(base string, conns int) submitter {
 			if c.Type == book.Market {
 				body["type"] = "market"
 			} else {
-				body["price"] = c.Price
+				body["price"] = c.Price - 100_000 + mid[symbol]
 			}
 			b, _ := json.Marshal(body)
 			req, err = http.NewRequestWithContext(ctx, http.MethodPost, base+"/v1/orders", bytes.NewReader(b))
@@ -273,15 +315,24 @@ func httpSubmitter(base string, conns int) submitter {
 		var out struct {
 			OrderID uint64 `json:"order_id"`
 			Status  string `json:"status"`
+			Error   string `json:"error"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 			return 0, err
 		}
-		if out.Status == "resting" {
+		if out.Error != "" {
+			// A gateway refusal (risk check) never reached the engine, so it
+			// would flatter the numbers; count it as a failure.
+			return 0, fmt.Errorf("refused by the gateway: %s", out.Error)
+		}
+		switch out.Status {
+		case "resting":
 			return out.OrderID, nil
+		case "rejected":
+			rejections.Add(1)
 		}
 		return 0, nil
-	}
+	}, nil
 }
 
 // slot is one simulated trader in open-loop mode.
