@@ -2,7 +2,6 @@
 bin
 data
 web
-deploy
 *.test
 *.out
 *.prof

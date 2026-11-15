@@ -1,0 +1,25 @@
+# Render Blueprint for the backend. The free plan sleeps after 15 minutes
+# without traffic and wipes /tmp, so each wake starts with fresh books.
+services:
+  - type: web
+    name: tape
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      # The Vercel origin of the frontend, e.g. https://tape.vercel.app.
+      - key: TAPE_CORS_ORIGINS
+        sync: false
+      - key: TAPE_WAL_SYNC
+        value: interval
+      - key: TAPE_PROXY_HOPS
+        value: "1"
+      - key: TAPE_SIM_INTENSITY
+        value: "0.5"
+      - key: TAPE_FEED_INTERVAL
+        value: 100ms
+      - key: TAPE_RATE_LIMIT
+        value: "20"
