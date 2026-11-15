@@ -38,7 +38,16 @@ export const api = {
   openOrders: (symbol: string, trader: number) => request<OpenOrder[]>("GET", `/v1/orders?symbol=${symbol}`, trader),
   place: (
     trader: number,
-    order: { symbol: string; side: Side; type: "limit" | "market"; tif?: string; post_only?: boolean; price?: number; qty: number },
+    order: {
+      symbol: string;
+      side: Side;
+      type: "limit" | "market";
+      tif?: string;
+      post_only?: boolean;
+      price?: number;
+      qty: number;
+      client_order_id?: string;
+    },
   ) => request<OrderResult>("POST", "/v1/orders", trader, order),
   cancel: (trader: number, id: number) => request<OrderResult>("DELETE", `/v1/orders/${id}`, trader),
 };

@@ -3,7 +3,7 @@ import { api } from "./api";
 import { WS_URL } from "./config";
 import type { Side, Snapshot, Trade, Update } from "./types";
 
-export type FeedStatus = "connecting" | "live" | "resyncing" | "offline";
+export type FeedStatus = "connecting" | "live" | "resyncing" | "offline" | "paused";
 
 export interface MarketView {
   status: FeedStatus;
@@ -19,13 +19,19 @@ export interface MarketView {
 }
 
 const MAX_TRADES = 3000;
-const CLOSE_TRY_AGAIN = 1013;
+const FLASH_KEEP_MS = 1000;
+
+// Sequence numbers restart with the server process. The epoch in each
+// snapshot tells a client that the server it reconnected to is a new one,
+// so trades and history from the old one must go.
+const epochs = new Map<string, string>();
 
 /**
  * MarketFeed keeps one symbol's book and tape from the WebSocket feed. Every
  * update names the sequence number of the message before it; if that is not
  * the last one applied, something was missed, so the feed drops the
- * connection and starts again from a fresh snapshot.
+ * connection and starts again from a fresh snapshot. While the page is
+ * hidden the socket is closed, so a background tab costs no bandwidth.
  */
 class MarketFeed {
   private ws: WebSocket | null = null;
@@ -48,8 +54,23 @@ class MarketFeed {
       version: 0,
     };
     this.loadHistory();
-    this.connect();
+    document.addEventListener("visibilitychange", this.onVisibility);
+    if (!document.hidden) this.connect();
+    else this.view.status = "paused";
   }
+
+  private onVisibility = () => {
+    if (document.hidden) {
+      clearTimeout(this.retryTimer);
+      const ws = this.ws;
+      this.ws = null;
+      ws?.close();
+      this.publish({ status: "paused" });
+    } else if (!this.ws) {
+      this.publish({ status: "connecting" });
+      this.connect();
+    }
+  };
 
   subscribe = (fn: () => void) => {
     this.listeners.add(fn);
@@ -60,6 +81,7 @@ class MarketFeed {
 
   close() {
     this.closed = true;
+    document.removeEventListener("visibilitychange", this.onVisibility);
     clearTimeout(this.retryTimer);
     cancelAnimationFrame(this.frame);
     this.ws?.close();
@@ -78,12 +100,12 @@ class MarketFeed {
   }
 
   private connect() {
-    const ws = new WebSocket(`${WS_URL}/v1/ws/${encodeURIComponent(this.symbol)}?depth=200`);
+    const ws = new WebSocket(`${WS_URL}/v1/ws/${encodeURIComponent(this.symbol)}`);
     this.ws = ws;
     ws.onmessage = (ev) => this.onMessage(ev.data as string);
-    ws.onclose = (ev) => {
+    ws.onclose = () => {
       if (this.ws !== ws || this.closed) return;
-      if (ev.code === CLOSE_TRY_AGAIN || this.view.status === "resyncing") {
+      if (this.view.status === "resyncing") {
         this.reconnect(0, "resyncing");
       } else {
         this.retry = Math.min(this.retry + 1, 5);
@@ -107,6 +129,13 @@ class MarketFeed {
     const msg = JSON.parse(raw) as Snapshot | Update;
     if (msg.type === "snapshot") {
       this.retry = 0;
+      const known = epochs.get(this.symbol);
+      epochs.set(this.symbol, msg.epoch);
+      const restarted = (known !== undefined && known !== msg.epoch) || msg.seq < this.view.seq;
+      if (restarted) {
+        this.view.trades = [];
+        this.loadHistory();
+      }
       const trades = mergeTrades(this.view.trades, msg.trades ?? []);
       this.publish({
         status: "live",
@@ -136,6 +165,9 @@ class MarketFeed {
       if (v.trades.length > MAX_TRADES * 1.2) v.trades = v.trades.slice(-MAX_TRADES);
     }
     v.seq = msg.seq;
+    for (const [key, at] of v.changed) {
+      if (now - at > FLASH_KEEP_MS) v.changed.delete(key);
+    }
     this.schedule();
   }
 
@@ -178,9 +210,11 @@ const idle: MarketView = {
 };
 const noop = () => () => {};
 
+/** useMarket follows one symbol's feed; with no symbol yet it stays idle. */
 export function useMarket(symbol: string): MarketView {
   const [feed, setFeed] = useState<MarketFeed | null>(null);
   useEffect(() => {
+    if (!symbol) return;
     const f = new MarketFeed(symbol);
     setFeed(f);
     return () => f.close();

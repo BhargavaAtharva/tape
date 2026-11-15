@@ -3,6 +3,11 @@ export type Side = "buy" | "sell";
 export interface SymbolInfo {
   symbol: string;
   price_scale: number;
+  reference: number;
+  band_low: number;
+  band_high: number;
+  max_qty: number;
+  max_notional: number;
   last: number;
   open: number;
   high: number;
@@ -26,6 +31,7 @@ export interface Trade {
 export interface Snapshot {
   type: "snapshot";
   symbol: string;
+  epoch: string;
   seq: number;
   bids: [number, number][];
   asks: [number, number][];
@@ -46,7 +52,24 @@ export interface OpenOrder {
   side: Side;
   price: number;
   qty: number;
+  filled: number;
   post_only: boolean;
+}
+
+/** An execution report from the private per-trader stream. */
+export interface Report {
+  type: "exec";
+  symbol: string;
+  seq: number;
+  time: number;
+  kind: "accepted" | "rejected" | "fill" | "cancelled" | "amended";
+  order_id: number;
+  side?: Side;
+  price?: number;
+  qty: number;
+  remaining: number;
+  liquidity?: "maker" | "taker";
+  reason?: string;
 }
 
 export interface OrderResult {

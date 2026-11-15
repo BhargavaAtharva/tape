@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api, ApiError } from "../lib/api";
 import { formatPrice, formatQty, parsePrice } from "../lib/format";
-import type { OrderResult, Side } from "../lib/types";
+import type { OrderResult, Side, SymbolInfo } from "../lib/types";
 import { Panel } from "./Panel";
 import styles from "./OrderEntry.module.css";
 
@@ -10,12 +10,11 @@ type TIF = "gtc" | "ioc" | "fok";
 
 interface Props {
   symbol: string;
-  scale: number;
+  info?: SymbolInfo;
   trader: number;
   picked: { price: number; side: Side; at: number } | null;
   bestBid?: number;
   bestAsk?: number;
-  onResult: (r: OrderResult) => void;
 }
 
 interface Outcome {
@@ -31,6 +30,12 @@ const REASONS: Record<string, string> = {
   self_trade: "Stopped to avoid trading with your own order",
   invalid_price: "Invalid price",
   invalid_qty: "Invalid quantity",
+  too_many_open_orders: "Too many open orders on this symbol",
+  price_outside_band: "Price is outside the allowed band",
+  qty_above_max: "Quantity is above the per-order limit",
+  notional_above_max: "Order value is above the per-order limit",
+  rate_limited: "Too many requests; slow down",
+  busy: "Exchange is busy; try again",
 };
 
 function describe(r: OrderResult, scale: number, price: number | null): Outcome {
@@ -50,7 +55,8 @@ function describe(r: OrderResult, scale: number, price: number | null): Outcome 
   }
 }
 
-export function OrderEntry({ symbol, scale, trader, picked, bestBid, bestAsk, onResult }: Props) {
+export function OrderEntry({ symbol, info, trader, picked, bestBid, bestAsk }: Props) {
+  const scale = info?.price_scale ?? 2;
   const [side, setSide] = useState<Side>("buy");
   const [kind, setKind] = useState<Kind>("limit");
   const [tif, setTif] = useState<TIF>("gtc");
@@ -80,9 +86,20 @@ export function OrderEntry({ symbol, scale, trader, picked, bestBid, bestAsk, on
 
   const ticks = kind === "limit" ? parsePrice(price, scale) : null;
   const lots = /^\d+$/.test(qty.trim()) ? Number(qty) : NaN;
-  const priceError = kind === "limit" && price !== "" && ticks === null ? `Up to ${scale} decimals` : "";
-  const qtyError = qty !== "" && !(lots > 0 && Number.isSafeInteger(lots)) ? "Whole lots only" : "";
-  const ready = !busy && lots > 0 && !qtyError && (kind === "market" || ticks !== null);
+  const outside = ticks !== null && info?.band_low && (ticks < info.band_low || ticks > info.band_high);
+  const priceError =
+    kind === "limit" && price !== "" && ticks === null
+      ? `Up to ${scale} decimals`
+      : outside
+        ? `Allowed ${formatPrice(info!.band_low, scale)} to ${formatPrice(info!.band_high, scale)}`
+        : "";
+  const qtyError =
+    qty !== "" && !(lots > 0 && Number.isSafeInteger(lots))
+      ? "Whole lots only"
+      : info?.max_qty && lots > info.max_qty
+        ? `At most ${formatQty(info.max_qty)} per order`
+        : "";
+  const ready = !busy && lots > 0 && !qtyError && !priceError && (kind === "market" || ticks !== null);
   const reference = kind === "limit" ? ticks : side === "buy" ? bestAsk : bestBid;
   const notional = reference && lots > 0 ? reference * lots : null;
 
@@ -91,8 +108,12 @@ export function OrderEntry({ symbol, scale, trader, picked, bestBid, bestAsk, on
     if (!ready) return;
     setBusy(true);
     setOutcome(null);
+    // One id per click: if the response is lost, a resend of the same
+    // request cannot place a second order.
+    const clientOrderId = crypto.randomUUID();
     try {
       const r = await api.place(trader, {
+        client_order_id: clientOrderId,
         symbol,
         side,
         type: kind,
@@ -102,9 +123,9 @@ export function OrderEntry({ symbol, scale, trader, picked, bestBid, bestAsk, on
         qty: lots,
       });
       setOutcome(describe(r, scale, ticks));
-      onResult(r);
     } catch (err) {
-      setOutcome({ tone: "error", text: err instanceof ApiError ? err.message : "Request failed" });
+      const text = err instanceof ApiError ? (REASONS[err.code] ?? err.message) : "Request failed";
+      setOutcome({ tone: "error", text });
     } finally {
       setBusy(false);
     }

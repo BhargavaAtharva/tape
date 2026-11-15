@@ -24,28 +24,8 @@
   color-scheme: dark;
 }
 
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) {
-    --bg: #f3f2ee;
-    --panel: #fbfaf8;
-    --raised: #efeee9;
-    --line: #e1dfd8;
-    --line-strong: #cfccc3;
-    --text: #1b1d20;
-    --text-2: #575c63;
-    --text-3: #8a8f96;
-    --accent: #b5770f;
-    --accent-soft: rgba(181, 119, 15, 0.12);
-    --bid: #1d7a4c;
-    --ask: #b33a33;
-    --bid-soft: rgba(29, 122, 76, 0.1);
-    --ask-soft: rgba(179, 58, 51, 0.1);
-    --bid-flash: rgba(29, 122, 76, 0.28);
-    --ask-flash: rgba(179, 58, 51, 0.28);
-    color-scheme: light;
-  }
-}
-
+/* The theme is resolved in script (system preference unless the user picked
+   one) and set on <html data-theme>; see lib/theme.ts and index.html. */
 :root[data-theme="light"] {
   --bg: #f3f2ee;
   --panel: #fbfaf8;
