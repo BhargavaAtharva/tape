@@ -4,6 +4,9 @@ A limit order book matching engine in Go: price-time priority, deterministic, cr
 log, with pre-trade risk checks, a conflated WebSocket market data feed, private execution reports and a trading
 screen.
 
+Live: [tape-exchange.vercel.app](https://tape-exchange.vercel.app). The engine runs on Render's free tier and
+sleeps when idle, so the first load can take about a minute and books start fresh after a wake.
+
 ![The trading screen with the simulated market running](docs/screenshot.png)
 
 ## Why this exists
