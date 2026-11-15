@@ -573,3 +573,48 @@ func TestPreTradeRiskChecks(t *testing.T) {
 		t.Fatalf("amend above max qty: %d %s", code, raw)
 	}
 }
+
+func TestClientOrderIDMakesRetriesSafe(t *testing.T) {
+	s := startStack(t, Config{}, 0, nil)
+	body := map[string]any{"symbol": "BTC-USD", "side": "buy", "price": 100, "qty": 3, "client_order_id": "abc-1"}
+	first := s.order(t, "POST", "/v1/orders", 7001, body, 200)
+	again := s.order(t, "POST", "/v1/orders", 7001, body, 200)
+	if first.OrderID == 0 || again.OrderID != first.OrderID || again.ClientOrderID != "abc-1" {
+		t.Fatalf("first %+v, retry %+v", first, again)
+	}
+	other := s.order(t, "POST", "/v1/orders", 7002, body, 200)
+	if other.OrderID == first.OrderID {
+		t.Fatal("client order ids are not per trader")
+	}
+	code, raw := s.do(t, "GET", "/v1/orders?symbol=BTC-USD", 7001, nil)
+	var open []openOrder
+	json.Unmarshal(raw, &open)
+	if code != 200 || len(open) != 1 {
+		t.Fatalf("the retry placed a second order: %s", raw)
+	}
+	bad := map[string]any{"symbol": "BTC-USD", "side": "buy", "price": 100, "qty": 3, "client_order_id": "no spaces"}
+	if code, _ := s.do(t, "POST", "/v1/orders", 7001, bad); code != 400 {
+		t.Fatalf("invalid client order id: %d", code)
+	}
+}
+
+func TestDedupeForgetsOldIDs(t *testing.T) {
+	d := newDedupe(time.Minute, 2)
+	now := time.Now()
+	for i, id := range []string{"a", "b", "c"} {
+		e, owner := d.claim(clientKey{1, id}, now.Add(time.Duration(i)*time.Second))
+		if !owner {
+			t.Fatalf("%s already claimed", id)
+		}
+		d.finish(e, response{status: 200})
+	}
+	if _, owner := d.claim(clientKey{1, "a"}, now.Add(3*time.Second)); !owner {
+		t.Fatal("oldest id kept beyond the size bound")
+	}
+	if _, owner := d.claim(clientKey{1, "c"}, now.Add(4*time.Second)); owner {
+		t.Fatal("recent id forgotten")
+	}
+	if _, owner := d.claim(clientKey{1, "c"}, now.Add(2*time.Minute)); !owner {
+		t.Fatal("id kept past the window")
+	}
+}

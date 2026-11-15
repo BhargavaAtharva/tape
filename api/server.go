@@ -58,6 +58,7 @@ type Server struct {
 	feeds   map[string]*feed.Feed
 	reports *feed.Reports
 	conns   connLimiter
+	dedupe  *dedupe
 	limiter *limiter
 	stats   *sampler
 	mux     *http.ServeMux
@@ -76,6 +77,7 @@ func New(cfg Config, x *engine.Exchange, feeds map[string]*feed.Feed, reports *f
 		cfg.MaxConnsPerAddr = 8
 	}
 	s := &Server{cfg: cfg, x: x, feeds: feeds, reports: reports, stats: newSampler(x, feeds), mux: http.NewServeMux()}
+	s.dedupe = newDedupe(10*time.Minute, 100_000)
 	s.conns = connLimiter{max: cfg.MaxConns, perAddr: cfg.MaxConnsPerAddr, byAddr: make(map[string]int)}
 	if cfg.RateLimit > 0 {
 		s.limiter = newLimiter(cfg.RateLimit, 2*cfg.RateLimit)
@@ -151,15 +153,21 @@ func writeError(w http.ResponseWriter, status int, code, msg string) {
 
 // engineError maps a failure to reach an engine onto a response.
 func engineError(w http.ResponseWriter, err error) {
+	r := engineResponse(err)
+	writeJSON(w, r.status, r.body)
+}
+
+func engineResponse(err error) response {
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		writeError(w, http.StatusServiceUnavailable, "timeout", "engine did not respond in time")
+		return response{http.StatusServiceUnavailable, apiError{"timeout", "engine did not respond in time"}}
+	case errors.Is(err, engine.ErrBusy):
+		return response{http.StatusTooManyRequests, apiError{"busy", "the engine is saturated; retry shortly"}}
 	case errors.Is(err, engine.ErrClosed):
-		writeError(w, http.StatusServiceUnavailable, "shutting_down", "engine is shutting down")
-	default:
-		slog.Error("engine unavailable", "err", err)
-		writeError(w, http.StatusServiceUnavailable, "engine_failed", "engine is unavailable")
+		return response{http.StatusServiceUnavailable, apiError{"shutting_down", "engine is shutting down"}}
 	}
+	slog.Error("engine unavailable", "err", err)
+	return response{http.StatusServiceUnavailable, apiError{"engine_failed", "engine is unavailable"}}
 }
 
 func (s *Server) feed(w http.ResponseWriter, r *http.Request) (*feed.Feed, bool) {

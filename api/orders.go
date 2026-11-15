@@ -17,7 +17,12 @@ import (
 // Trader ids must survive a round trip through a JavaScript number.
 const maxTrader = 1<<53 - 1
 
-const submitTimeout = 5 * time.Second
+const (
+	submitTimeout = 5 * time.Second
+	// detachedTimeout bounds a client-order-id submission that outlives its
+	// request.
+	detachedTimeout = time.Minute
+)
 
 type eventJSON struct {
 	Seq            uint64 `json:"seq"`
@@ -47,13 +52,14 @@ func toJSON(e book.Event) eventJSON {
 
 // orderResult summarises what one command did to the order it was about.
 type orderResult struct {
-	OrderID   uint64      `json:"order_id"`
-	Symbol    string      `json:"symbol"`
-	Status    string      `json:"status"`
-	Reason    string      `json:"reason,omitempty"`
-	Filled    int64       `json:"filled"`
-	Remaining int64       `json:"remaining"`
-	Events    []eventJSON `json:"events"`
+	OrderID       uint64      `json:"order_id"`
+	ClientOrderID string      `json:"client_order_id,omitempty"`
+	Symbol        string      `json:"symbol"`
+	Status        string      `json:"status"`
+	Reason        string      `json:"reason,omitempty"`
+	Filled        int64       `json:"filled"`
+	Remaining     int64       `json:"remaining"`
+	Events        []eventJSON `json:"events"`
 }
 
 // summarise reports on the order a command targeted; for a new order the
@@ -138,6 +144,22 @@ type newOrderRequest struct {
 	PostOnly bool   `json:"post_only"`
 	Price    int64  `json:"price"`
 	Qty      int64  `json:"qty"`
+	// ClientOrderID, if set, makes the request idempotent per trader: a
+	// resend with the same id returns the first outcome.
+	ClientOrderID string `json:"client_order_id"`
+}
+
+func validClientID(id string) bool {
+	if len(id) > 36 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 // command translates the wire names. Range checks on price and quantity are
@@ -188,6 +210,10 @@ func (s *Server) handleNewOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "unknown_symbol", "no such symbol")
 		return
 	}
+	if !validClientID(req.ClientOrderID) {
+		writeError(w, http.StatusBadRequest, "invalid_client_order_id", "client_order_id is up to 36 letters, digits, '-' or '_'")
+		return
+	}
 	cmd, msg := req.command(trader)
 	if msg != "" {
 		writeError(w, http.StatusBadRequest, "invalid_order", msg)
@@ -200,19 +226,71 @@ func (s *Server) handleNewOrder(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.submit(w, r, e, cmd)
+	if req.ClientOrderID == "" {
+		s.submit(w, r, e, cmd)
+		return
+	}
+	key := clientKey{trader, req.ClientOrderID}
+	entry, owner := s.dedupe.claim(key, time.Now())
+	if owner {
+		// The submission runs detached from this request, so that if the
+		// client gives up waiting the outcome is still recorded for its retry.
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), detachedTimeout)
+			defer cancel()
+			resp, reached := s.execute(ctx, e, cmd)
+			if res, ok := resp.body.(orderResult); ok {
+				res.ClientOrderID = req.ClientOrderID
+				resp.body = res
+			}
+			if reached {
+				s.dedupe.finish(entry, resp)
+			} else {
+				s.dedupe.forget(key, entry, resp)
+			}
+		}()
+	}
+	select {
+	case <-entry.done:
+		if !owner {
+			w.Header().Set("Idempotent-Replayed", "true")
+		}
+		writeJSON(w, entry.resp.status, entry.resp.body)
+	case <-time.After(submitTimeout):
+		writePending(w)
+	case <-r.Context().Done():
+	}
+}
+
+// writePending answers a request whose command was queued but whose result
+// did not come back in time. The order may still execute; with a
+// client_order_id the client can resend to learn the outcome.
+func writePending(w http.ResponseWriter) {
+	writeError(w, http.StatusServiceUnavailable, "pending", "outcome unknown: the order may still execute; resend with the same client_order_id to learn the result")
 }
 
 func (s *Server) submit(w http.ResponseWriter, r *http.Request, e *engine.Engine, cmd book.Command) {
 	ctx, cancel := context.WithTimeout(r.Context(), submitTimeout)
 	defer cancel()
-	res, err := e.Submit(ctx, cmd)
-	if err != nil {
-		engineError(w, err)
-		return
+	resp, _ := s.execute(ctx, e, cmd)
+	writeJSON(w, resp.status, resp.body)
+}
+
+// execute sends a command without waiting for queue space and reports the
+// response along with whether the command reached the engine, in which case
+// it will execute whether or not its result arrives before ctx ends.
+func (s *Server) execute(ctx context.Context, e *engine.Engine, cmd book.Command) (response, bool) {
+	res, err := e.TrySubmit(ctx, cmd)
+	switch {
+	case err == nil:
+		out, reason := summarise(e.Symbol(), cmd.OrderID, res.Events)
+		return response{rejectStatus(reason), out}, true
+	case errors.Is(err, engine.ErrBusy):
+		return response{http.StatusTooManyRequests, apiError{"busy", "the engine is saturated; retry shortly"}}, false
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		return response{http.StatusServiceUnavailable, apiError{"pending", "outcome unknown: the order may still execute; resend with the same client_order_id to learn the result"}}, true
 	}
-	out, reason := summarise(e.Symbol(), cmd.OrderID, res.Events)
-	writeJSON(w, rejectStatus(reason), out)
+	return engineResponse(err), false
 }
 
 func (s *Server) orderTarget(w http.ResponseWriter, r *http.Request) (*engine.Engine, uint64, bool) {
