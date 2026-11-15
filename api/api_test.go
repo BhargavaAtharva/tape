@@ -35,7 +35,7 @@ func startStack(t *testing.T, cfg Config, feedBuffer int, configure func(*engine
 	if cfg.Origins == nil {
 		cfg.Origins = []string{"*"}
 	}
-	st, err := Start(cfg, feedBuffer, configure)
+	st, err := Start(cfg, feed.Options{Buffer: feedBuffer}, configure)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -428,7 +428,7 @@ func TestBookSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 	durable := func(c *engine.Config) { c.Dir = dir + "/" + c.Symbol }
 	cfg := Config{Symbols: []Symbol{{Name: "BTC-USD", PriceScale: 2}}, Origins: []string{"*"}}
-	st, err := Start(cfg, 0, durable)
+	st, err := Start(cfg, feed.Options{}, durable)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,5 +446,54 @@ func TestBookSurvivesRestart(t *testing.T) {
 	code, raw := s.do(t, "GET", "/v1/book/BTC-USD", 0, nil)
 	if code != 200 || !strings.Contains(string(raw), `"bids":[[500,7]],"asks":[[510,2]]`) {
 		t.Fatalf("book after restart: %d %s", code, raw)
+	}
+}
+
+func TestPrivateExecutionReports(t *testing.T) {
+	s := startStack(t, Config{MinTrader: 1000}, 0, nil)
+	ws := "ws" + strings.TrimPrefix(s.url, "http") + "/v1/ws/private?trader=5001"
+	conn, _, err := websocket.Dial(context.Background(), ws, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	waitFor(t, func() bool { return s.Reports.Subscribers() == 1 })
+
+	ask := s.order(t, "POST", "/v1/orders", 5001, map[string]any{"symbol": "BTC-USD", "side": "sell", "price": 100, "qty": 5}, 200)
+	s.order(t, "POST", "/v1/orders", 5002, map[string]any{"symbol": "BTC-USD", "side": "buy", "price": 100, "qty": 2}, 200)
+
+	var got []feed.Report
+	for len(got) < 2 {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, data, err := conn.Read(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("after %d reports: %v", len(got), err)
+		}
+		var r feed.Report
+		json.Unmarshal(data, &r)
+		got = append(got, r)
+	}
+	if got[0].Kind != "accepted" || got[0].OrderID != ask.OrderID {
+		t.Fatalf("ack %+v", got[0])
+	}
+	if got[1].Kind != "fill" || got[1].OrderID != ask.OrderID || got[1].Remaining != 3 || got[1].Liquidity != "maker" {
+		t.Fatalf("fill %+v", got[1])
+	}
+	if _, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(s.url, "http")+"/v1/ws/private?trader=5", nil); err == nil {
+		t.Fatal("a bot trader id was accepted on the private stream")
+	}
+}
+
+func TestWebSocketConnectionCap(t *testing.T) {
+	s := startStack(t, Config{MaxConnsPerAddr: 2}, 0, nil)
+	url := s.url + "/v1/ws/BTC-USD"
+	for range 2 {
+		c := dialWS(t, url, nil)
+		defer c.CloseNow()
+	}
+	_, resp, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(url, "http"), nil)
+	if err == nil || resp == nil || resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("third connection from one address: %v", err)
 	}
 }

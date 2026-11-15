@@ -39,6 +39,10 @@ type Config struct {
 	// WriteTimeout bounds one WebSocket write; a client that cannot take a
 	// message within it is dropped.
 	WriteTimeout time.Duration
+	// MaxConns and MaxConnsPerAddr cap open WebSocket connections in total
+	// and per client address.
+	MaxConns        int
+	MaxConnsPerAddr int
 	// Info is extra static information served on /v1/stats, such as the WAL
 	// sync policy and whether the simulator is running.
 	Info map[string]string
@@ -48,17 +52,26 @@ type Server struct {
 	cfg     Config
 	x       *engine.Exchange
 	feeds   map[string]*feed.Feed
+	reports *feed.Reports
+	conns   connLimiter
 	limiter *limiter
 	stats   *sampler
 	mux     *http.ServeMux
 }
 
-func New(cfg Config, x *engine.Exchange, feeds map[string]*feed.Feed) *Server {
+func New(cfg Config, x *engine.Exchange, feeds map[string]*feed.Feed, reports *feed.Reports) *Server {
 	cfg.MinTrader = max(cfg.MinTrader, 1)
 	if cfg.WriteTimeout <= 0 {
 		cfg.WriteTimeout = 5 * time.Second
 	}
-	s := &Server{cfg: cfg, x: x, feeds: feeds, stats: newSampler(x, feeds), mux: http.NewServeMux()}
+	if cfg.MaxConns <= 0 {
+		cfg.MaxConns = 500
+	}
+	if cfg.MaxConnsPerAddr <= 0 {
+		cfg.MaxConnsPerAddr = 8
+	}
+	s := &Server{cfg: cfg, x: x, feeds: feeds, reports: reports, stats: newSampler(x, feeds), mux: http.NewServeMux()}
+	s.conns = connLimiter{max: cfg.MaxConns, perAddr: cfg.MaxConnsPerAddr, byAddr: make(map[string]int)}
 	if cfg.RateLimit > 0 {
 		s.limiter = newLimiter(cfg.RateLimit, 2*cfg.RateLimit)
 	}
@@ -71,6 +84,7 @@ func New(cfg Config, x *engine.Exchange, feeds map[string]*feed.Feed) *Server {
 	s.mux.HandleFunc("POST /v1/orders", s.limited(s.handleNewOrder))
 	s.mux.HandleFunc("DELETE /v1/orders/{id}", s.limited(s.handleCancel))
 	s.mux.HandleFunc("PATCH /v1/orders/{id}", s.limited(s.handleAmend))
+	s.mux.HandleFunc("GET /v1/ws/private", s.handlePrivateWS)
 	s.mux.HandleFunc("GET /v1/ws/{symbol}", s.handleWS)
 	return s
 }

@@ -2,18 +2,21 @@
 // mirror, a trades tape and per-symbol statistics, fanned out to subscribers.
 //
 // The engine hands batches to Publish, which never blocks. A feed goroutine
-// applies them in sequence order. If the engine ever outruns it, the feed
-// sees a sequence gap, rebuilds its mirror from the engine and carries on;
-// the engine is never slowed down by the feed or by anyone subscribed to it.
+// applies them in sequence order and, every Interval, sends subscribers one
+// conflated update: the latest quantity of each level that changed and the
+// trades since the last update. If the engine ever outruns the feed, the
+// feed sees a sequence gap, rebuilds its mirror from the engine and sends
+// every subscriber a fresh snapshot; the engine is never slowed down by the
+// feed or by anyone subscribed to it.
 package feed
 
 import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/BhargavaAtharva/tape/book"
 )
@@ -21,6 +24,7 @@ import (
 const (
 	inboundBatches = 4096
 	tapeLength     = 500
+	snapshotTrades = 100
 )
 
 // State is what a feed needs to rebuild itself: the full L2 book as of the
@@ -47,9 +51,9 @@ type Delta struct {
 	Qty   int64  `json:"qty"`
 }
 
-// Update is one engine batch as seen by market data. Prev is the Seq of the
-// message before it, so a subscriber that gets an Update whose Prev is not
-// the last Seq it saw knows it has missed something.
+// Update covers every engine event after Prev up to and including Seq.
+// Prev is the Seq of the message before it, so a subscriber that gets an
+// Update whose Prev is not the last Seq it saw knows it has missed something.
 type Update struct {
 	Type   string  `json:"type"`
 	Symbol string  `json:"symbol"`
@@ -59,9 +63,13 @@ type Update struct {
 	Trades []Trade `json:"trades"`
 }
 
+// Snapshot is the whole book. Epoch identifies the server process: sequence
+// numbers restart when the process does, and a client that sees a new epoch
+// must drop everything it holds.
 type Snapshot struct {
 	Type   string     `json:"type"`
 	Symbol string     `json:"symbol"`
+	Epoch  string     `json:"epoch"`
 	Seq    uint64     `json:"seq"`
 	Bids   [][2]int64 `json:"bids"`
 	Asks   [][2]int64 `json:"asks"`
@@ -80,39 +88,61 @@ type Ticker struct {
 	BestAsk int64 `json:"best_ask"`
 }
 
+type Options struct {
+	// Buffer is how many messages a subscriber may fall behind by before it
+	// is dropped.
+	Buffer int
+	// Interval is the conflation period. Zero sends one update per engine
+	// batch.
+	Interval time.Duration
+	Epoch    string
+	// Reports, if set, receives every applied batch for the private
+	// per-trader execution streams.
+	Reports *Reports
+}
+
+type pendingKey struct {
+	side  book.Side
+	price int64
+}
+
 type Feed struct {
 	symbol string
+	opts   Options
 	in     chan []book.Event
-	bufLen int
 
 	overruns atomic.Uint64
 	resyncs  atomic.Uint64
 	dropped  atomic.Uint64
 
-	mu     sync.Mutex
-	bids   map[int64]int64
-	asks   map[int64]int64
-	seq    uint64
-	prev   uint64
-	tape   []Trade
-	tapeAt int
-	ticker Ticker
-	subs   map[*Subscriber]struct{}
+	mu   sync.Mutex
+	bids ladder
+	asks ladder
+	// seq is the last engine event applied to the mirror; prev the Seq of
+	// the last message sent, which is where a new subscriber starts.
+	seq          uint64
+	prev         uint64
+	pending      []Delta
+	pendingIndex map[pendingKey]int
+	pendingTrade []Trade
+	tape         []Trade
+	tapeAt       int
+	ticker       Ticker
+	subs         map[*Subscriber]struct{}
 }
 
-// New creates a feed. bufLen is how many messages a subscriber may fall
-// behind by before it is dropped.
-func New(symbol string, bufLen int) *Feed {
-	if bufLen <= 0 {
-		bufLen = 256
+func New(symbol string, opts Options) *Feed {
+	if opts.Buffer <= 0 {
+		opts.Buffer = 256
 	}
 	return &Feed{
-		symbol: symbol,
-		in:     make(chan []book.Event, inboundBatches),
-		bufLen: bufLen,
-		bids:   make(map[int64]int64),
-		asks:   make(map[int64]int64),
-		subs:   make(map[*Subscriber]struct{}),
+		symbol:       symbol,
+		opts:         opts,
+		in:           make(chan []book.Event, inboundBatches),
+		bids:         newLadder(true),
+		asks:         newLadder(false),
+		pendingIndex: make(map[pendingKey]int),
+		subs:         make(map[*Subscriber]struct{}),
 	}
 }
 
@@ -139,42 +169,65 @@ func (f *Feed) Run(ctx context.Context, resync func(context.Context) (State, err
 		slog.Error("feed initial sync failed", "symbol", f.symbol, "err", err)
 	}
 	f.mu.Unlock()
+	var tick <-chan time.Time
+	if f.opts.Interval > 0 {
+		t := time.NewTicker(f.opts.Interval)
+		defer t.Stop()
+		tick = t.C
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			f.closeAll()
 			return
-		case evs := <-f.in:
-			if len(evs) == 0 {
-				continue
-			}
+		case <-tick:
 			f.mu.Lock()
-			if evs[len(evs)-1].Seq <= f.seq {
-				f.mu.Unlock()
-				continue
+			f.flushLocked()
+			f.mu.Unlock()
+		case evs := <-f.in:
+			f.mu.Lock()
+			f.ingestLocked(ctx, evs, resync)
+			if tick == nil {
+				f.flushLocked()
 			}
-			if evs[0].Seq != f.seq+1 {
-				if err := f.resyncLocked(ctx, resync); err != nil {
-					f.mu.Unlock()
-					if ctx.Err() == nil {
-						slog.Error("feed resync failed", "symbol", f.symbol, "err", err)
-					}
-					continue
-				}
-				if evs[len(evs)-1].Seq <= f.seq {
-					f.mu.Unlock()
-					continue
-				}
-			}
-			f.applyLocked(evs)
 			f.mu.Unlock()
 		}
 	}
 }
 
-// resyncLocked replaces the mirror with the engine's state. Subscribers are
-// disconnected because the deltas they would need no longer exist; clients
-// reconnect and start from a fresh snapshot.
+// ingestLocked applies the events of a batch that the mirror has not seen.
+// A batch can overlap the mirror after a resync, because the engine answers
+// a resync query between two commands of a batch it has not published yet;
+// the overlapping events are already reflected in the state and are skipped.
+func (f *Feed) ingestLocked(ctx context.Context, evs []book.Event, resync func(context.Context) (State, error)) {
+	for len(evs) > 0 && evs[0].Seq <= f.seq {
+		evs = evs[1:]
+	}
+	if len(evs) == 0 {
+		return
+	}
+	if evs[0].Seq != f.seq+1 {
+		if err := f.resyncLocked(ctx, resync); err != nil {
+			if ctx.Err() == nil {
+				slog.Error("feed resync failed", "symbol", f.symbol, "err", err)
+			}
+			return
+		}
+		for len(evs) > 0 && evs[0].Seq <= f.seq {
+			evs = evs[1:]
+		}
+		if len(evs) == 0 {
+			return
+		}
+	}
+	f.applyLocked(evs)
+	if f.opts.Reports != nil {
+		f.opts.Reports.route(f.symbol, evs)
+	}
+}
+
+// resyncLocked replaces the mirror with the engine's state and sends every
+// subscriber a fresh snapshot in place of the deltas that were lost.
 func (f *Feed) resyncLocked(ctx context.Context, resync func(context.Context) (State, error)) error {
 	st, err := resync(ctx)
 	if err != nil {
@@ -183,23 +236,25 @@ func (f *Feed) resyncLocked(ctx context.Context, resync func(context.Context) (S
 	if st.Seq == f.seq {
 		return nil
 	}
-	clear(f.bids)
-	clear(f.asks)
-	for _, l := range st.Bids {
-		f.bids[l.Price] = l.Qty
-	}
-	for _, l := range st.Asks {
-		f.asks[l.Price] = l.Qty
-	}
 	if f.seq != 0 || len(f.subs) > 0 {
-		slog.Warn("feed resynced", "symbol", f.symbol, "from_seq", f.seq, "to_seq", st.Seq, "subscribers_dropped", len(f.subs))
+		slog.Warn("feed resynced", "symbol", f.symbol, "from_seq", f.seq, "to_seq", st.Seq, "subscribers", len(f.subs))
 		f.resyncs.Add(1)
 	}
+	f.bids.reset(st.Bids)
+	f.asks.reset(st.Asks)
+	f.pending = f.pending[:0]
+	clear(f.pendingIndex)
+	f.pendingTrade = f.pendingTrade[:0]
 	f.seq, f.prev = st.Seq, st.Seq
-	for s := range f.subs {
-		f.dropLocked(s, ReasonResync)
-	}
 	f.updateBestLocked()
+	if len(f.subs) == 0 {
+		return nil
+	}
+	msg, err := json.Marshal(f.snapshotLocked(0, snapshotTrades))
+	if err != nil {
+		return err
+	}
+	f.broadcastLocked(msg)
 	return nil
 }
 
@@ -211,42 +266,58 @@ func sideName(s book.Side) string {
 }
 
 func (f *Feed) applyLocked(evs []book.Event) {
-	u := Update{Type: "update", Symbol: f.symbol, Prev: f.prev, Seq: evs[len(evs)-1].Seq}
 	for i := range evs {
 		e := &evs[i]
 		switch e.Kind {
 		case book.EvBookDelta:
-			levels := f.asks
 			if e.Side == book.Buy {
-				levels = f.bids
-			}
-			if e.Qty == 0 {
-				delete(levels, e.Price)
+				f.bids.set(e.Price, e.Qty)
 			} else {
-				levels[e.Price] = e.Qty
+				f.asks.set(e.Price, e.Qty)
 			}
-			u.Deltas = appendDelta(u.Deltas, Delta{Side: sideName(e.Side), Price: e.Price, Qty: e.Qty})
+			k := pendingKey{e.Side, e.Price}
+			if j, ok := f.pendingIndex[k]; ok {
+				f.pending[j].Qty = e.Qty
+			} else {
+				f.pendingIndex[k] = len(f.pending)
+				f.pending = append(f.pending, Delta{Side: sideName(e.Side), Price: e.Price, Qty: e.Qty})
+			}
 		case book.EvFill:
 			t := Trade{Seq: e.Seq, Time: e.Time / 1e6, Price: e.Price, Qty: e.Qty, Side: sideName(e.Side),
 				MakerOrderID: e.MakerOrderID, TakerOrderID: e.OrderID}
-			u.Trades = append(u.Trades, t)
+			f.pendingTrade = append(f.pendingTrade, t)
 			f.recordTradeLocked(t)
 		}
 	}
-	f.seq = u.Seq
-	if len(u.Deltas) == 0 && len(u.Trades) == 0 {
-		return
-	}
+	f.seq = evs[len(evs)-1].Seq
 	f.updateBestLocked()
-	f.prev = u.Seq
-	if len(f.subs) == 0 {
+}
+
+// flushLocked sends what has accumulated since the last update as one
+// message. Batches with nothing for market data advance seq without a
+// message; the next update's range simply covers them.
+func (f *Feed) flushLocked() {
+	if len(f.pending) == 0 && len(f.pendingTrade) == 0 {
 		return
 	}
-	msg, err := json.Marshal(u)
+	u := Update{Type: "update", Symbol: f.symbol, Prev: f.prev, Seq: f.seq, Deltas: f.pending, Trades: f.pendingTrade}
+	var msg []byte
+	var err error
+	if len(f.subs) > 0 {
+		msg, err = json.Marshal(u)
+	}
+	f.prev = f.seq
+	f.pending = f.pending[:0]
+	clear(f.pendingIndex)
+	f.pendingTrade = f.pendingTrade[:0]
 	if err != nil {
 		slog.Error("feed encode failed", "symbol", f.symbol, "err", err)
 		return
 	}
+	f.broadcastLocked(msg)
+}
+
+func (f *Feed) broadcastLocked(msg []byte) {
 	for s := range f.subs {
 		select {
 		case s.ch <- msg:
@@ -254,18 +325,6 @@ func (f *Feed) applyLocked(evs []book.Event) {
 			f.dropLocked(s, ReasonSlow)
 		}
 	}
-}
-
-// appendDelta keeps only the last value per level within one update, in the
-// order levels were first touched.
-func appendDelta(ds []Delta, d Delta) []Delta {
-	for i := range ds {
-		if ds[i].Side == d.Side && ds[i].Price == d.Price {
-			ds[i].Qty = d.Qty
-			return ds
-		}
-	}
-	return append(ds, d)
 }
 
 func (f *Feed) recordTradeLocked(t Trade) {
@@ -287,15 +346,8 @@ func (f *Feed) recordTradeLocked(t Trade) {
 }
 
 func (f *Feed) updateBestLocked() {
-	f.ticker.BestBid, f.ticker.BestAsk = 0, 0
-	for p := range f.bids {
-		f.ticker.BestBid = max(f.ticker.BestBid, p)
-	}
-	for p := range f.asks {
-		if f.ticker.BestAsk == 0 || p < f.ticker.BestAsk {
-			f.ticker.BestAsk = p
-		}
-	}
+	f.ticker.BestBid, _ = f.bids.best()
+	f.ticker.BestAsk, _ = f.asks.best()
 }
 
 // tradesLocked returns up to n recent trades, oldest first.
@@ -308,39 +360,26 @@ func (f *Feed) tradesLocked(n int) []Trade {
 	return ordered
 }
 
-func levels(m map[int64]int64, desc bool, depth int) [][2]int64 {
-	out := make([][2]int64, 0, len(m))
-	for p, q := range m {
-		out = append(out, [2]int64{p, q})
-	}
-	slices.SortFunc(out, func(a, b [2]int64) int {
-		if desc {
-			return int(b[0] - a[0])
-		}
-		return int(a[0] - b[0])
-	})
-	if depth > 0 && depth < len(out) {
-		out = out[:depth]
-	}
-	return out
-}
-
+// snapshotLocked describes the book as of f.prev, so callers must flush
+// first unless nothing is pending.
 func (f *Feed) snapshotLocked(depth, trades int) Snapshot {
-	return Snapshot{
-		Type: "snapshot", Symbol: f.symbol, Seq: f.prev,
-		Bids:   levels(f.bids, true, depth),
-		Asks:   levels(f.asks, false, depth),
-		Trades: f.tradesLocked(trades),
+	snap := Snapshot{
+		Type: "snapshot", Symbol: f.symbol, Epoch: f.opts.Epoch, Seq: f.prev,
+		Bids: f.bids.top(depth),
+		Asks: f.asks.top(depth),
 	}
+	if trades > 0 {
+		snap.Trades = f.tradesLocked(trades)
+	}
+	return snap
 }
 
 // Book returns the current L2 view, up to depth levels a side (0 = all).
 func (f *Feed) Book(depth int) Snapshot {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	snap := f.snapshotLocked(depth, 0)
-	snap.Trades = nil
-	return snap
+	f.flushLocked()
+	return f.snapshotLocked(depth, 0)
 }
 
 // Trades returns up to n recent trades, oldest first.
@@ -375,7 +414,6 @@ type DropReason int
 const (
 	ReasonNone DropReason = iota
 	ReasonSlow
-	ReasonResync
 	ReasonShutdown
 )
 
@@ -383,8 +421,6 @@ func (r DropReason) String() string {
 	switch r {
 	case ReasonSlow:
 		return "slow consumer"
-	case ReasonResync:
-		return "feed resync"
 	case ReasonShutdown:
 		return "shutting down"
 	}
@@ -392,7 +428,8 @@ func (r DropReason) String() string {
 }
 
 // Subscriber receives encoded messages on C until Done is closed. The first
-// message is always a snapshot; every later one is an Update.
+// message is always a snapshot, and so is any message after a resync; all
+// others are updates.
 type Subscriber struct {
 	ch     chan []byte
 	done   chan struct{}
@@ -401,7 +438,7 @@ type Subscriber struct {
 
 func (s *Subscriber) C() <-chan []byte { return s.ch }
 
-// Done is closed when the feed drops the subscriber; Reason then says why.
+// Done is closed when the subscriber is dropped; Reason then says why.
 func (s *Subscriber) Done() <-chan struct{} { return s.done }
 
 func (s *Subscriber) Reason() DropReason {
@@ -409,17 +446,24 @@ func (s *Subscriber) Reason() DropReason {
 	return s.reason
 }
 
-// Subscribe registers a subscriber and queues its initial snapshot. Taking
-// the snapshot and registering happen under the same lock as applying
-// updates, so the subscriber's first Update follows its snapshot exactly.
-func (f *Feed) Subscribe(depth, trades int) (*Subscriber, error) {
+func newSubscriber(buf int) *Subscriber {
+	return &Subscriber{ch: make(chan []byte, buf), done: make(chan struct{})}
+}
+
+// Subscribe registers a subscriber and queues a snapshot of the full book
+// for it. Pending changes are flushed first and everything happens under
+// the lock that guards updates, so the subscriber's first update follows
+// its snapshot exactly. Snapshots are always full depth: a client given a
+// partial book could not apply deltas below its cut-off without holes.
+func (f *Feed) Subscribe() (*Subscriber, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	msg, err := json.Marshal(f.snapshotLocked(depth, trades))
+	f.flushLocked()
+	msg, err := json.Marshal(f.snapshotLocked(0, snapshotTrades))
 	if err != nil {
 		return nil, err
 	}
-	s := &Subscriber{ch: make(chan []byte, f.bufLen), done: make(chan struct{})}
+	s := newSubscriber(f.opts.Buffer)
 	s.ch <- msg
 	f.subs[s] = struct{}{}
 	return s, nil

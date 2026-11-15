@@ -20,6 +20,7 @@ import (
 
 	"github.com/BhargavaAtharva/tape/api"
 	"github.com/BhargavaAtharva/tape/engine"
+	"github.com/BhargavaAtharva/tape/feed"
 	"github.com/BhargavaAtharva/tape/sim"
 	"github.com/BhargavaAtharva/tape/wal"
 )
@@ -36,6 +37,7 @@ type config struct {
 	rateLimit     float64
 	trustProxy    bool
 	feedBuffer    int
+	feedInterval  time.Duration
 	sim           bool
 	simIntensity  float64
 }
@@ -74,6 +76,9 @@ func loadConfig() (config, error) {
 	}
 	if c.feedBuffer, err = strconv.Atoi(env("TAPE_FEED_BUFFER", "512")); err != nil {
 		return c, fmt.Errorf("TAPE_FEED_BUFFER: %w", err)
+	}
+	if c.feedInterval, err = time.ParseDuration(env("TAPE_FEED_INTERVAL", "100ms")); err != nil {
+		return c, fmt.Errorf("TAPE_FEED_INTERVAL: %w", err)
 	}
 	if c.sim, err = strconv.ParseBool(env("TAPE_SIM", "true")); err != nil {
 		return c, fmt.Errorf("TAPE_SIM: %w", err)
@@ -133,7 +138,7 @@ func run() error {
 		TrustProxy: cfg.trustProxy,
 		MinTrader:  sim.MaxBotTrader + 1,
 		Info:       map[string]string{"wal_sync": durability, "simulator": strconv.FormatBool(cfg.sim)},
-	}, cfg.feedBuffer, func(c *engine.Config) {
+	}, feed.Options{Buffer: cfg.feedBuffer, Interval: cfg.feedInterval}, func(c *engine.Config) {
 		if cfg.dataDir != "" {
 			c.Dir = filepath.Join(cfg.dataDir, c.Symbol)
 			c.WAL = wal.Options{Sync: cfg.walSync, Interval: cfg.walInterval}
