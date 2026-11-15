@@ -9,9 +9,11 @@ import (
 )
 
 // limiter is a token bucket per client address. Idle buckets are swept
-// lazily so the map cannot grow without bound.
+// every minute, and the map is capped: when it is full of active clients,
+// new addresses are refused rather than letting memory grow.
 type limiter struct {
 	rate, burst float64
+	maxKeys     int
 
 	mu        sync.Mutex
 	buckets   map[string]*bucket
@@ -23,23 +25,34 @@ type bucket struct {
 	at     time.Time
 }
 
-func newLimiter(rate, burst float64) *limiter {
-	return &limiter{rate: rate, burst: burst, buckets: make(map[string]*bucket), lastSweep: time.Now()}
+func newLimiter(rate, burst float64, maxKeys int) *limiter {
+	return &limiter{rate: rate, burst: burst, maxKeys: maxKeys, buckets: make(map[string]*bucket), lastSweep: time.Now()}
+}
+
+func (l *limiter) sweepLocked(now time.Time) {
+	for k, b := range l.buckets {
+		// A bucket idle long enough to have refilled is the same as none.
+		if now.Sub(b.at).Seconds()*l.rate >= l.burst {
+			delete(l.buckets, k)
+		}
+	}
+	l.lastSweep = now
 }
 
 func (l *limiter) allow(key string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if now.Sub(l.lastSweep) > time.Minute {
-		for k, b := range l.buckets {
-			if now.Sub(b.at) > time.Minute {
-				delete(l.buckets, k)
-			}
-		}
-		l.lastSweep = now
+		l.sweepLocked(now)
 	}
 	b := l.buckets[key]
 	if b == nil {
+		if len(l.buckets) >= l.maxKeys {
+			l.sweepLocked(now)
+			if len(l.buckets) >= l.maxKeys {
+				return false
+			}
+		}
 		b = &bucket{tokens: l.burst, at: now}
 		l.buckets[key] = b
 	}
@@ -53,10 +66,15 @@ func (l *limiter) allow(key string, now time.Time) bool {
 }
 
 func (s *Server) clientAddr(r *http.Request) string {
-	if s.cfg.TrustProxy {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			first, _, _ := strings.Cut(xff, ",")
-			return strings.TrimSpace(first)
+	if s.cfg.ProxyHops > 0 {
+		var hops []string
+		for _, h := range r.Header.Values("X-Forwarded-For") {
+			for part := range strings.SplitSeq(h, ",") {
+				hops = append(hops, strings.TrimSpace(part))
+			}
+		}
+		if i := len(hops) - s.cfg.ProxyHops; i >= 0 && i < len(hops) && hops[i] != "" {
+			return hops[i]
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -73,7 +91,7 @@ func (s *Server) limited(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.limiter.allow(s.clientAddr(r), time.Now()) {
 			w.Header().Set("Retry-After", "1")
-			writeError(w, http.StatusTooManyRequests, "rate_limited", "too many order requests")
+			writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
 			return
 		}
 		h(w, r)

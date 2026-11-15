@@ -618,3 +618,46 @@ func TestDedupeForgetsOldIDs(t *testing.T) {
 		t.Fatal("id kept past the window")
 	}
 }
+
+func TestClientAddressUsesTrustedHops(t *testing.T) {
+	s := &Server{cfg: Config{ProxyHops: 1}}
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "10.0.0.1:5000"
+	r.Header.Add("X-Forwarded-For", "6.6.6.6, 1.2.3.4")
+	if got := s.clientAddr(r); got != "1.2.3.4" {
+		t.Fatalf("one trusted hop: %s, want the right-most entry", got)
+	}
+	s.cfg.ProxyHops = 0
+	if got := s.clientAddr(r); got != "10.0.0.1" {
+		t.Fatalf("no trusted hops: %s", got)
+	}
+}
+
+func TestLimiterIsBounded(t *testing.T) {
+	l := newLimiter(1, 2, 2)
+	now := time.Now()
+	if !l.allow("a", now) || !l.allow("b", now) {
+		t.Fatal("first requests refused")
+	}
+	if l.allow("c", now) {
+		t.Fatal("a third address was admitted to a full table")
+	}
+	if !l.allow("c", now.Add(3*time.Second)) {
+		t.Fatal("idle buckets were not swept to make room")
+	}
+}
+
+func TestBodyErrorsAreClean(t *testing.T) {
+	s := startStack(t, Config{}, 0, nil)
+	code, raw := s.do(t, "POST", "/v1/orders", 5000, map[string]any{"symbol": "BTC-USD", "side": "buy", "price": "high", "qty": 1})
+	if code != 400 || strings.Contains(string(raw), "Go ") || strings.Contains(string(raw), "int64") {
+		t.Fatalf("type error: %d %s", code, raw)
+	}
+	big := map[string]any{"symbol": strings.Repeat("x", 5000)}
+	if code, _ := s.do(t, "POST", "/v1/orders", 5000, big); code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized body: %d", code)
+	}
+	if code, raw := s.do(t, "GET", "/healthz", 0, nil); code != 200 || string(raw) != "ok\n" {
+		t.Fatalf("healthz %d %q", code, raw)
+	}
+}

@@ -35,7 +35,7 @@ type config struct {
 	snapshotEvery uint64
 	origins       []string
 	rateLimit     float64
-	trustProxy    bool
+	proxyHops     int
 	feedBuffer    int
 	feedInterval  time.Duration
 	sim           bool
@@ -53,7 +53,7 @@ func loadConfig() (config, error) {
 	c := config{
 		addr:    ":" + env("PORT", "8081"),
 		dataDir: env("TAPE_DATA_DIR", "data"),
-		origins: strings.Split(env("TAPE_CORS_ORIGINS", "*"), ","),
+		origins: splitList(env("TAPE_CORS_ORIGINS", "*")),
 	}
 	var err error
 	if c.symbols, err = parseSymbols(env("TAPE_SYMBOLS", "BTC-USD:2:64250,ETH-USD:2:3120,SOL-USD:3:148.5,NIFTY:2:24350")); err != nil {
@@ -71,8 +71,8 @@ func loadConfig() (config, error) {
 	if c.rateLimit, err = strconv.ParseFloat(env("TAPE_RATE_LIMIT", "20"), 64); err != nil {
 		return c, fmt.Errorf("TAPE_RATE_LIMIT: %w", err)
 	}
-	if c.trustProxy, err = strconv.ParseBool(env("TAPE_TRUST_PROXY", "false")); err != nil {
-		return c, fmt.Errorf("TAPE_TRUST_PROXY: %w", err)
+	if c.proxyHops, err = strconv.Atoi(env("TAPE_PROXY_HOPS", "0")); err != nil || c.proxyHops < 0 {
+		return c, fmt.Errorf("TAPE_PROXY_HOPS: want a non-negative integer")
 	}
 	if c.feedBuffer, err = strconv.Atoi(env("TAPE_FEED_BUFFER", "512")); err != nil {
 		return c, fmt.Errorf("TAPE_FEED_BUFFER: %w", err)
@@ -127,6 +127,16 @@ func parseSymbols(s string) ([]api.Symbol, error) {
 	return syms, nil
 }
 
+func splitList(s string) []string {
+	var out []string
+	for item := range strings.SplitSeq(s, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	if err := run(); err != nil {
@@ -145,13 +155,13 @@ func run() error {
 		durability = cfg.walSync.String()
 	}
 	st, err := api.Start(api.Config{
-		Symbols:    cfg.symbols,
-		Risk:       cfg.risk,
-		Origins:    cfg.origins,
-		RateLimit:  cfg.rateLimit,
-		TrustProxy: cfg.trustProxy,
-		MinTrader:  sim.MaxBotTrader + 1,
-		Info:       map[string]string{"wal_sync": durability, "simulator": strconv.FormatBool(cfg.sim)},
+		Symbols:   cfg.symbols,
+		Risk:      cfg.risk,
+		Origins:   cfg.origins,
+		RateLimit: cfg.rateLimit,
+		ProxyHops: cfg.proxyHops,
+		MinTrader: sim.MaxBotTrader + 1,
+		Info:      map[string]string{"wal_sync": durability, "simulator": strconv.FormatBool(cfg.sim)},
 	}, feed.Options{Buffer: cfg.feedBuffer, Interval: cfg.feedInterval}, func(c *engine.Config) {
 		if cfg.dataDir != "" {
 			c.Dir = filepath.Join(cfg.dataDir, c.Symbol)
@@ -193,6 +203,8 @@ func run() error {
 		Addr:              cfg.addr,
 		Handler:           st.Server,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
 	ln, err := net.Listen("tcp", cfg.addr)

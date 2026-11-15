@@ -106,7 +106,7 @@ func (s *sampler) sample(now time.Time) {
 			Seq: st.Seq, QueueDepth: st.QueueDepth, LatencyNs: percentiles(window),
 			WAL: walStats{
 				Durable: st.Durable, Written: st.WALWritten, Synced: st.WALSynced,
-				Lag: st.WALWritten - st.WALSynced, SnapshotIndex: st.SnapshotIndex,
+				Lag: st.WALWritten - min(st.WALSynced, st.WALWritten), SnapshotIndex: st.SnapshotIndex,
 			},
 			Feed: s.feeds[e.Symbol()].Stats(),
 		}

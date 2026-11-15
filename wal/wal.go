@@ -328,7 +328,7 @@ func (l *Log) Commit() error {
 		if err := l.f.Sync(); err != nil {
 			return fmt.Errorf("wal: sync: %w", err)
 		}
-		l.synced.Store(l.last)
+		l.advanceSynced(l.last)
 	}
 	return nil
 }
@@ -344,8 +344,19 @@ func (l *Log) Sync() error {
 	if err := l.f.Sync(); err != nil {
 		return fmt.Errorf("wal: sync: %w", err)
 	}
-	l.synced.Store(l.last)
+	l.advanceSynced(l.last)
 	return nil
+}
+
+// advanceSynced raises the synced index, never lowers it: the background
+// syncer may finish an older fsync after Sync has recorded a newer one.
+func (l *Log) advanceSynced(v uint64) {
+	for {
+		cur := l.synced.Load()
+		if v <= cur || l.synced.CompareAndSwap(cur, v) {
+			return
+		}
+	}
 }
 
 func (l *Log) syncLoop() {
@@ -371,7 +382,7 @@ func (l *Log) syncLoop() {
 			l.syncErr.Store(&err)
 			return
 		}
-		l.synced.Store(upTo)
+		l.advanceSynced(upTo)
 	}
 }
 

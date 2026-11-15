@@ -59,6 +59,11 @@ func (s *Server) accept(w http.ResponseWriter, r *http.Request) (*websocket.Conn
 	if s.allowAnyOrigin() {
 		opts.InsecureSkipVerify = true
 	}
+	// The server's read and write timeouts suit short requests; a stream
+	// manages its own deadlines with pings and per-write timeouts.
+	rc := http.NewResponseController(w)
+	rc.SetReadDeadline(time.Time{})
+	rc.SetWriteDeadline(time.Time{})
 	conn, err := websocket.Accept(w, r, opts)
 	if err != nil {
 		s.conns.release(addr)

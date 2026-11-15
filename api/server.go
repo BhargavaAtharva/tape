@@ -37,8 +37,11 @@ type Config struct {
 	// MinTrader is the lowest trader id clients may use; ids below it are
 	// reserved for the in-process simulator.
 	MinTrader uint64
-	// TrustProxy takes the client address from X-Forwarded-For.
-	TrustProxy bool
+	// ProxyHops is the number of reverse proxies in front of the server.
+	// The client address is then the ProxyHops-th X-Forwarded-For entry
+	// from the right: entries further left are whatever the client sent and
+	// cannot be trusted. Zero uses the connection's address.
+	ProxyHops int
 	// WriteTimeout bounds one WebSocket write; a client that cannot take a
 	// message within it is dropped.
 	WriteTimeout time.Duration
@@ -80,14 +83,14 @@ func New(cfg Config, x *engine.Exchange, feeds map[string]*feed.Feed, reports *f
 	s.dedupe = newDedupe(10*time.Minute, 100_000)
 	s.conns = connLimiter{max: cfg.MaxConns, perAddr: cfg.MaxConnsPerAddr, byAddr: make(map[string]int)}
 	if cfg.RateLimit > 0 {
-		s.limiter = newLimiter(cfg.RateLimit, 2*cfg.RateLimit)
+		s.limiter = newLimiter(cfg.RateLimit, 2*cfg.RateLimit, 50_000)
 	}
-	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
+	s.mux.HandleFunc("GET /healthz", s.handleHealth)
 	s.mux.HandleFunc("GET /v1/symbols", s.handleSymbols)
 	s.mux.HandleFunc("GET /v1/book/{symbol}", s.handleBook)
 	s.mux.HandleFunc("GET /v1/trades/{symbol}", s.handleTrades)
 	s.mux.HandleFunc("GET /v1/stats", s.handleStats)
-	s.mux.HandleFunc("GET /v1/orders", s.handleOpenOrders)
+	s.mux.HandleFunc("GET /v1/orders", s.limited(s.handleOpenOrders))
 	s.mux.HandleFunc("POST /v1/orders", s.limited(s.handleNewOrder))
 	s.mux.HandleFunc("DELETE /v1/orders/{id}", s.limited(s.handleCancel))
 	s.mux.HandleFunc("PATCH /v1/orders/{id}", s.limited(s.handleAmend))
@@ -197,6 +200,18 @@ type symbolInfo struct {
 	band
 	MaxQty      int64   `json:"max_qty"`
 	MaxNotional float64 `json:"max_notional"`
+}
+
+// handleHealth fails if any engine has stopped, so a platform health check
+// restarts a server that can no longer accept orders for some symbol.
+func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	for _, e := range s.x.Engines() {
+		if err := e.Err(); err != nil {
+			writeError(w, http.StatusServiceUnavailable, "engine_failed", e.Symbol()+" has stopped")
+			return
+		}
+	}
+	w.Write([]byte("ok\n"))
 }
 
 func (s *Server) handleSymbols(w http.ResponseWriter, _ *http.Request) {

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/BhargavaAtharva/tape/book"
@@ -126,7 +127,21 @@ func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+		var tooBig *http.MaxBytesError
+		var typeErr *json.UnmarshalTypeError
+		var syntaxErr *json.SyntaxError
+		switch {
+		case errors.As(err, &tooBig):
+			writeError(w, http.StatusRequestEntityTooLarge, "body_too_large", "request body is limited to 4 KB")
+		case errors.As(err, &typeErr):
+			writeError(w, http.StatusBadRequest, "invalid_body", fmt.Sprintf("field %q has the wrong type", typeErr.Field))
+		case errors.As(err, &syntaxErr), errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF):
+			writeError(w, http.StatusBadRequest, "invalid_body", "body is not a JSON object")
+		case strings.HasPrefix(err.Error(), "json: unknown field "):
+			writeError(w, http.StatusBadRequest, "invalid_body", strings.TrimPrefix(err.Error(), "json: "))
+		default:
+			writeError(w, http.StatusBadRequest, "invalid_body", "body could not be read")
+		}
 		return false
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
@@ -359,12 +374,13 @@ type openOrder struct {
 	Side     string `json:"side"`
 	Price    int64  `json:"price"`
 	Qty      int64  `json:"qty"`
+	Filled   int64  `json:"filled"`
 	PostOnly bool   `json:"post_only"`
 }
 
-// handleOpenOrders scans the book on the engine goroutine. The book keeps
-// no per-trader index because matching never needs one; a linear scan is
-// fine for a status query.
+// handleOpenOrders lists the trader's resting orders from the book's
+// per-trader index, so the query costs the engine time proportional to
+// that trader's orders, not the whole book.
 func (s *Server) handleOpenOrders(w http.ResponseWriter, r *http.Request) {
 	trader, ok := s.traderID(w, r)
 	if !ok {
@@ -379,13 +395,9 @@ func (s *Server) handleOpenOrders(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	out := []openOrder{}
 	err := e.Query(ctx, func(b *book.Book) {
-		collect := func(o *book.Order) {
-			if o.Trader == trader {
-				out = append(out, openOrder{OrderID: o.ID, Side: o.Side.String(), Price: o.Price, Qty: o.Qty, PostOnly: o.PostOnly})
-			}
-		}
-		b.Orders(book.Buy, collect)
-		b.Orders(book.Sell, collect)
+		b.TraderOrders(trader, func(o *book.Order) {
+			out = append(out, openOrder{OrderID: o.ID, Side: o.Side.String(), Price: o.Price, Qty: o.Qty, Filled: o.Filled, PostOnly: o.PostOnly})
+		})
 	})
 	if err != nil {
 		engineError(w, err)
