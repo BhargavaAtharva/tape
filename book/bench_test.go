@@ -94,17 +94,21 @@ func BenchmarkApplyMixed(b *testing.B) {
 // fresh or existing level away from the touch and is then cancelled.
 func BenchmarkRestAndCancel(b *testing.B) {
 	cmds := make([]Command, 0, 200_000)
+	// 1000 traders, so no one reaches the open-order cap.
+	trader := func(id int) uint64 { return uint64(1 + (id-1)%1000) }
 	for i := range 100_000 {
-		cmds = append(cmds, Command{Kind: CmdNew, Type: Limit, TIF: GTC, Side: Buy, Trader: 1, Price: int64(1000 + i%500), Qty: 5})
+		cmds = append(cmds, Command{Kind: CmdNew, Type: Limit, TIF: GTC, Side: Buy, Trader: trader(i + 1), Price: int64(1000 + i%500), Qty: 5})
 	}
 	for i := range 100_000 {
-		cmds = append(cmds, Command{Kind: CmdCancel, Trader: 1, OrderID: uint64(100_000 - i)})
+		id := 100_000 - i
+		cmds = append(cmds, Command{Kind: CmdCancel, Trader: trader(id), OrderID: uint64(id)})
 	}
 	runStream(b, cmds)
 }
 
-// BenchmarkSweep has every taker cross five levels of a book that is
-// constantly refilled.
+// BenchmarkSweep alternates five resting orders, one per level, with a
+// market order that takes all five. ns/op is per command: one sweep costs
+// six of them.
 func BenchmarkSweep(b *testing.B) {
 	var cmds []Command
 	for range 20_000 {
