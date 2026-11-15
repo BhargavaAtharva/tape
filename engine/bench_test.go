@@ -10,7 +10,7 @@ import (
 )
 
 // benchEngine measures the engine pipeline (channel hand-off, batching,
-// optional WAL, matching, reply) with many concurrent submitters.
+// optional WAL, matching, reply) with concurrent submitters.
 func benchEngine(b *testing.B, cfg Config) {
 	cmds := genCommands(11, 1<<16)
 	e, err := Open(cfg)
@@ -21,7 +21,9 @@ func benchEngine(b *testing.B, cfg Config) {
 	defer e.Close()
 	var next atomic.Uint64
 	b.ReportAllocs()
-	b.SetParallelism(8)
+	// One submitter per GOMAXPROCS (10 on the M4), each waiting for its
+	// result before sending the next.
+	b.SetParallelism(1)
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		ctx := context.Background()

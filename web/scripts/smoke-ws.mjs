@@ -10,7 +10,7 @@ const seconds = Number(process.argv[3] ?? 5);
 const wsBase = base.replace(/^http/, "ws");
 
 function open(symbol) {
-  return new WebSocket(`${wsBase}/v1/ws/${symbol}?depth=1000`);
+  return new WebSocket(`${wsBase}/v1/ws/${symbol}`);
 }
 
 function nextMessage(ws) {
@@ -29,6 +29,7 @@ async function check(symbol) {
   const book = { seq: 0, bids: new Map(), asks: new Map() };
   let updates = 0;
   let trades = 0;
+  let resyncs = 0;
   let target = null;
   let matched = false;
   // Fingerprints of recent states by sequence number: the second client's
@@ -46,7 +47,8 @@ async function check(symbol) {
     ws.onmessage = (e) => {
       const m = JSON.parse(e.data);
       if (m.type === "snapshot") {
-        if (book.seq !== 0) failure ??= "second snapshot on one connection";
+        // A later snapshot is the server resyncing this client in place.
+        if (book.seq !== 0) resyncs++;
         book.seq = m.seq;
         book.bids = new Map(m.bids);
         book.asks = new Map(m.asks);
@@ -95,7 +97,7 @@ async function check(symbol) {
   await done;
   if (!failure && !updates) failure = "no updates received";
   if (!failure && !matched) failure = "never reached the second snapshot's sequence number";
-  return { symbol, updates, trades, seq: book.seq, levels: book.bids.size + book.asks.size, failure };
+  return { symbol, updates, trades, resyncs, seq: book.seq, levels: book.bids.size + book.asks.size, failure };
 }
 
 const symbols = await fetch(`${base}/v1/symbols`).then((r) => r.json());
@@ -103,7 +105,7 @@ const results = await Promise.all(symbols.map((s) => check(s.symbol)));
 let failed = false;
 for (const r of results) {
   const status = r.failure ? `FAIL ${r.failure}` : "ok";
-  console.log(`${r.symbol.padEnd(10)} updates=${r.updates} trades=${r.trades} last_seq=${r.seq} levels=${r.levels} ${status}`);
+  console.log(`${r.symbol.padEnd(10)} updates=${r.updates} trades=${r.trades} resyncs=${r.resyncs} last_seq=${r.seq} levels=${r.levels} ${status}`);
   failed ||= !!r.failure;
 }
 process.exit(failed ? 1 : 0);

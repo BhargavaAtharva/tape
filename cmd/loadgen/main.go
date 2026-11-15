@@ -5,6 +5,13 @@
 // on, and measures from Submit to result: queueing, group commit (including
 // fsync under -sync=batch) and matching. In http mode it targets a running
 // server and measures full request round trips over keep-alive connections.
+//
+// By default it is closed loop: each worker waits for a result before
+// sending again, so when the system stalls the workers stop sending and the
+// stall is under-sampled (coordinated omission). With -rate it is open
+// loop instead: commands are scheduled at a fixed arrival rate and latency
+// is measured from each command's scheduled time, so time spent waiting
+// behind a stall counts.
 package main
 
 import (
@@ -38,6 +45,7 @@ type options struct {
 	duration time.Duration
 	sync     wal.SyncPolicy
 	dataDir  string
+	rate     float64
 }
 
 func main() {
@@ -50,6 +58,7 @@ func main() {
 	flag.DurationVar(&o.duration, "duration", 10*time.Second, "how long to run")
 	flag.StringVar(&policy, "sync", "batch", "WAL sync policy for engine mode: batch, interval or none")
 	flag.StringVar(&o.dataDir, "data", "", "WAL directory for engine mode (default: a fresh temp dir)")
+	flag.Float64Var(&o.rate, "rate", 0, "open loop: total commands per second at a fixed arrival rate (0: closed loop)")
 	flag.Parse()
 	o.symbols = strings.Split(symbols, ",")
 	var err error
@@ -107,7 +116,17 @@ func run(o options) error {
 	var wg sync.WaitGroup
 	var firstErr atomic.Pointer[error]
 	start := time.Now()
+	fail := func(err error) {
+		failures.Add(1)
+		firstErr.CompareAndSwap(nil, &err)
+	}
+	if o.rate > 0 {
+		openLoop(ctx, o, submit, &lat, &orders, fail)
+	}
 	for si, sym := range o.symbols {
+		if o.rate > 0 {
+			break
+		}
 		for w := range o.workers {
 			// Above the ids the demo simulator reserves for its bots.
 			trader := uint64(1000 + si*o.workers + w)
@@ -122,8 +141,7 @@ func run(o options) error {
 						if ctx.Err() != nil {
 							return
 						}
-						failures.Add(1)
-						firstErr.CompareAndSwap(nil, &err)
+						fail(err)
 						continue
 					}
 					lat.Record(int64(time.Since(t0)))
@@ -143,7 +161,11 @@ func run(o options) error {
 
 	c := lat.Snapshot()
 	n := orders.Load()
-	fmt.Printf("symbols=%d workers_per_symbol=%d duration=%s\n", len(o.symbols), o.workers, elapsed.Round(time.Millisecond))
+	if o.rate > 0 {
+		fmt.Printf("symbols=%d open_loop_rate=%.0f/s duration=%s\n", len(o.symbols), o.rate, elapsed.Round(time.Millisecond))
+	} else {
+		fmt.Printf("symbols=%d workers_per_symbol=%d duration=%s\n", len(o.symbols), o.workers, elapsed.Round(time.Millisecond))
+	}
 	fmt.Printf("commands=%d failures=%d throughput=%.0f/s\n", n, failures.Load(), float64(n)/elapsed.Seconds())
 	fmt.Printf("latency p50=%s p99=%s p99.9=%s\n", dur(c.Quantile(0.5)), dur(c.Quantile(0.99)), dur(c.Quantile(0.999)))
 	if p := firstErr.Load(); p != nil {
@@ -259,5 +281,76 @@ func httpSubmitter(base string, conns int) submitter {
 			return out.OrderID, nil
 		}
 		return 0, nil
+	}
+}
+
+// slot is one simulated trader in open-loop mode.
+type slot struct {
+	symbol  string
+	trader  uint64
+	mu      sync.Mutex
+	rng     *rand.Rand
+	resting []uint64
+}
+
+// maxInFlight bounds open-loop concurrency. A command that would exceed it
+// is counted as a failure: the system is not keeping up with the rate.
+const maxInFlight = 20_000
+
+// openLoop sends commands at o.rate per second until ctx ends, spread
+// round-robin over workers*symbols traders, and records each latency from
+// the moment the command was due rather than when it was actually sent.
+func openLoop(ctx context.Context, o options, submit submitter, lat *hist.Histogram, orders *atomic.Uint64, fail func(error)) {
+	var slots []*slot
+	for si, sym := range o.symbols {
+		for w := range o.workers {
+			trader := uint64(1000 + si*o.workers + w)
+			slots = append(slots, &slot{symbol: sym, trader: trader, rng: rand.New(rand.NewPCG(trader, 1))})
+		}
+	}
+	interval := time.Duration(float64(time.Second) / o.rate)
+	sem := make(chan struct{}, maxInFlight)
+	var wg sync.WaitGroup
+	start := time.Now()
+	for i := 0; ; i++ {
+		due := start.Add(time.Duration(i) * interval)
+		if wait := time.Until(due); wait > 0 {
+			select {
+			case <-ctx.Done():
+				wg.Wait()
+				return
+			case <-time.After(wait):
+			}
+		} else if ctx.Err() != nil {
+			wg.Wait()
+			return
+		}
+		select {
+		case sem <- struct{}{}:
+		default:
+			fail(errors.New("more than 20000 commands in flight: the target is not keeping up"))
+			continue
+		}
+		sl := slots[i%len(slots)]
+		wg.Go(func() {
+			defer func() { <-sem }()
+			sl.mu.Lock()
+			c := nextCommand(sl.rng, sl.trader, &sl.resting)
+			sl.mu.Unlock()
+			id, err := submit(ctx, sl.symbol, c)
+			if err != nil {
+				if ctx.Err() == nil {
+					fail(err)
+				}
+				return
+			}
+			lat.Record(int64(time.Since(due)))
+			orders.Add(1)
+			if id != 0 {
+				sl.mu.Lock()
+				sl.resting = append(sl.resting, id)
+				sl.mu.Unlock()
+			}
+		})
 	}
 }
