@@ -64,13 +64,13 @@ ok  	github.com/BhargavaAtharva/tape/book	61.495s
 ## Benchmarks
 
 The same benchmark files run back to back at three commits, each checked out in a temporary worktree:
-`944b375` (before the allocation work), `a529a8f` (after it), `HEAD` (then `38085a1`, the current matching and
+`1089969` (before the allocation work), `34ff67b` (after it), `HEAD` (then `bd22fc8`, the current matching and
 engine code).
 
 ```
 $ go test -run '^$' -bench . -benchtime=1s -count=5 ./book ./engine     # at each commit
 pmset lowpowermode: 1, power: Now drawing from 'Battery Power'
-### commit 944b375  loadavg { 7.50 4.98 4.05 }
+### commit 1089969  loadavg { 7.50 4.98 4.05 }
 BenchmarkApplyMixed-10       	 5897038	       202.3 ns/op	   4942568 orders/s	     435 B/op	       2 allocs/op
 BenchmarkApplyMixed-10       	 6049278	       204.7 ns/op	   4885866 orders/s	     435 B/op	       2 allocs/op
 BenchmarkApplyMixed-10       	 5895687	       205.0 ns/op	   4877828 orders/s	     435 B/op	       2 allocs/op
@@ -101,7 +101,7 @@ BenchmarkRecoverReplay-10      	      28	  37330860 ns/op	   2678749 cmds/s	1018
 BenchmarkRecoverReplay-10      	      39	  37496082 ns/op	   2666945 cmds/s	101891147 B/op	  237466 allocs/op
 BenchmarkRecoverReplay-10      	      24	  44361894 ns/op	   2254187 cmds/s	101894550 B/op	  237468 allocs/op
 BenchmarkRecoverReplay-10      	      30	  35255938 ns/op	   2836402 cmds/s	101888362 B/op	  237467 allocs/op
-### commit a529a8f  loadavg { 6.58 5.07 4.13 }
+### commit 34ff67b  loadavg { 6.58 5.07 4.13 }
 BenchmarkApplyMixed-10       	 9315534	       115.2 ns/op	   8676831 orders/s	       5 B/op	       0 allocs/op
 BenchmarkApplyMixed-10       	10723228	       112.9 ns/op	   8859300 orders/s	       5 B/op	       0 allocs/op
 BenchmarkApplyMixed-10       	10578578	       113.3 ns/op	   8823554 orders/s	       5 B/op	       0 allocs/op
@@ -266,7 +266,7 @@ it, the Vite dev server pointed at the proxy, and the app open in headless Chrom
 compression, including the initial page data.
 
 ```
-# commit 3348464 (before the changes), default bot intensity 1
+# commit 963a7a9 (before the changes), default bot intensity 1
 seconds=125.0 server_to_client_bytes=1361154 client_to_server_bytes=115990
 server_to_client=10.63 KB/s (37.4 MB/h)
 

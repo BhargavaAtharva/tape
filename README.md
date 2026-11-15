@@ -234,10 +234,10 @@ from `VERIFICATION.md`, which has the full output and commands.
 ### Matching core
 
 `go test -run '^$' -bench . -benchtime=1s -count=5 ./book`, median of 5, the same benchmark file run at three
-commits back to back: `944b375` (before the allocation work), `a529a8f` (after it) and the current code, which
+commits back to back: `1089969` (before the allocation work), `34ff67b` (after it) and the current code, which
 adds the per-trader index, total-quantity amends, TTLs and the open-order cap.
 
-| benchmark | 944b375 | a529a8f | current | current allocs/op |
+| benchmark | 1089969 | 34ff67b | current | current allocs/op |
 | --- | --- | --- | --- | --- |
 | ApplyMixed: 60% limit, 10% market, 25% cancel, 5% amend | 204.7 ns | 115.2 ns | 144.5 ns | 0 |
 | RestAndCancel: 100k orders over 1000 traders, then cancel all | 262.3 ns | 112.6 ns | 162.5 ns | 0 |
@@ -250,7 +250,7 @@ and are rejected as unknown, as they would be on a real venue.
 
 ### Engine pipeline (`./engine`, one submitter per GOMAXPROCS, i.e. 10)
 
-| benchmark | 944b375 | a529a8f | current |
+| benchmark | 1089969 | 34ff67b | current |
 | --- | --- | --- | --- |
 | SubmitInMemory | 1365 ns, 5 allocs | 1240 ns, 0 allocs | 1226 ns, 0 allocs |
 | SubmitWALNoSync | 2479 ns, 5 allocs | 1694 ns, 0 allocs | 1632 ns, 0 allocs |
@@ -306,7 +306,7 @@ One browser tab on the trading screen, measured through a byte-counting proxy fo
 
 | build | bots | bandwidth |
 | --- | --- | --- |
-| before (`3348464`: an update per batch, 2 s and 1 s polls, no compression) | intensity 1 | 10.63 KB/s (37.4 MB/h) |
+| before (`963a7a9`: an update per batch, 2 s and 1 s polls, no compression) | intensity 1 | 10.63 KB/s (37.4 MB/h) |
 | current (100 ms conflation, deflate, 10 s and 5 s polls, my orders pushed) | intensity 1 | 1.36 KB/s (4.8 MB/h) |
 | current, default settings | intensity 0.5 | 0.92 KB/s (3.2 MB/h) |
 
