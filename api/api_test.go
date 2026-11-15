@@ -98,7 +98,7 @@ func TestOrderLifecycleOverREST(t *testing.T) {
 		t.Fatalf("crossing bid %+v", bid)
 	}
 	mkt := s.order(t, "POST", "/v1/orders", 2, map[string]any{"symbol": "BTC-USD", "side": "buy", "type": "market", "qty": 4}, 200)
-	if mkt.Status != "cancelled" || mkt.Filled != 2 || mkt.Reason != "no_liquidity" {
+	if mkt.Status != "cancelled" || mkt.Filled != 2 || mkt.Reason != "ioc_remainder" {
 		t.Fatalf("market order %+v", mkt)
 	}
 	rej := s.order(t, "POST", "/v1/orders", 1, map[string]any{"symbol": "BTC-USD", "side": "buy", "price": 10000, "qty": 0}, 422)
@@ -138,7 +138,7 @@ func TestOrderLifecycleOverREST(t *testing.T) {
 	}
 
 	code, raw = s.do(t, "GET", "/v1/symbols", 0, nil)
-	if code != 200 || !strings.Contains(string(raw), `"symbol":"BTC-USD","price_scale":2,"last":10100`) {
+	if code != 200 || !strings.Contains(string(raw), `"symbol":"BTC-USD","price_scale":2,"reference":0,"last":10100`) {
 		t.Fatalf("symbols %d %s", code, raw)
 	}
 }
@@ -495,5 +495,81 @@ func TestWebSocketConnectionCap(t *testing.T) {
 	_, resp, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(url, "http"), nil)
 	if err == nil || resp == nil || resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("third connection from one address: %v", err)
+	}
+}
+
+func TestPreTradeRiskChecks(t *testing.T) {
+	cfg := Config{
+		Symbols: []Symbol{{Name: "BTC-USD", PriceScale: 2, Ref: 10_000}},
+		Risk:    Risk{CollarPct: 10, StaticPct: 25, MaxQty: 100, MaxNotional: 5_000, OrderTTL: time.Minute},
+	}
+	s := startStack(t, cfg, 0, nil)
+	post := func(trader uint64, body map[string]any, want int) (orderResult, apiError) {
+		t.Helper()
+		body["symbol"] = "BTC-USD"
+		code, raw := s.do(t, "POST", "/v1/orders", trader, body)
+		if code != want {
+			t.Fatalf("%v: status %d, want %d: %s", body, code, want, raw)
+		}
+		var res orderResult
+		var e apiError
+		json.Unmarshal(raw, &res)
+		json.Unmarshal(raw, &e)
+		return res, e
+	}
+
+	// The attack from the review: a huge buy that would sweep the book.
+	if _, e := post(5000, map[string]any{"side": "buy", "price": 1 << 40, "qty": 1 << 40}, 422); e.Error != "price_outside_band" {
+		t.Fatalf("huge price: %+v", e)
+	}
+	if _, e := post(5000, map[string]any{"side": "buy", "price": 10_000, "qty": 101}, 422); e.Error != "qty_above_max" {
+		t.Fatalf("huge qty: %+v", e)
+	}
+	if _, e := post(5000, map[string]any{"side": "buy", "price": 10_000, "qty": 60}, 422); e.Error != "notional_above_max" {
+		t.Fatalf("notional 6000: %+v", e)
+	}
+
+	// The band follows the last trade. An ask placed while the price was
+	// high must be out of reach of a market buy once the price has fallen.
+	trade := func(price int) {
+		post(5001, map[string]any{"side": "sell", "price": price, "qty": 1}, 200)
+		post(5002, map[string]any{"side": "buy", "price": price, "qty": 1}, 200)
+		waitFor(t, func() bool { return s.Feeds["BTC-USD"].Ticker().Last == int64(price) })
+	}
+	trade(10_400)
+	post(5001, map[string]any{"side": "sell", "price": 11_400, "qty": 2}, 200)
+	if _, e := post(5001, map[string]any{"side": "sell", "price": 11_500, "qty": 2}, 422); e.Error != "price_outside_band" {
+		t.Fatalf("ask above the collar: %+v", e)
+	}
+	trade(9_600)
+	mkt, _ := post(5002, map[string]any{"side": "buy", "type": "market", "qty": 2}, 200)
+	if mkt.Filled != 0 || mkt.Status != "cancelled" {
+		t.Fatalf("market buy reached past the band: %+v", mkt)
+	}
+	var syms []symbolInfo
+	_, raw := s.do(t, "GET", "/v1/symbols", 0, nil)
+	json.Unmarshal(raw, &syms)
+	if syms[0].BandLow != 8640 || syms[0].BandHigh != 10560 {
+		t.Fatalf("band %+v", syms[0].band)
+	}
+
+	rest, _ := post(5003, map[string]any{"side": "buy", "price": 9_500, "qty": 1}, 200)
+	e, _ := s.Exchange.Engine("BTC-USD")
+	var ttl int64
+	e.Query(context.Background(), func(b *book.Book) {
+		if o := b.Order(rest.OrderID); o != nil {
+			ttl = o.ExpireAt
+		}
+	})
+	if ttl == 0 {
+		t.Fatal("resting order from outside has no expiry")
+	}
+	code, raw := s.do(t, "PATCH", fmt.Sprintf("/v1/orders/%d", rest.OrderID), 5003, map[string]any{"price": 5_000})
+	if code != 422 || !strings.Contains(string(raw), "price_outside_band") {
+		t.Fatalf("amend out of band: %d %s", code, raw)
+	}
+	code, raw = s.do(t, "PATCH", fmt.Sprintf("/v1/orders/%d", rest.OrderID), 5003, map[string]any{"qty": 1000})
+	if code != 422 || !strings.Contains(string(raw), "qty_above_max") {
+		t.Fatalf("amend above max qty: %d %s", code, raw)
 	}
 }

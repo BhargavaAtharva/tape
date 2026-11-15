@@ -21,6 +21,9 @@ import (
 type Symbol struct {
 	Name       string `json:"symbol"`
 	PriceScale int    `json:"price_scale"`
+	// Ref is the reference price in ticks that the static band is centred
+	// on; zero disables the static band.
+	Ref int64 `json:"reference"`
 }
 
 type Config struct {
@@ -39,6 +42,7 @@ type Config struct {
 	// WriteTimeout bounds one WebSocket write; a client that cannot take a
 	// message within it is dropped.
 	WriteTimeout time.Duration
+	Risk         Risk
 	// MaxConns and MaxConnsPerAddr cap open WebSocket connections in total
 	// and per client address.
 	MaxConns        int
@@ -61,6 +65,7 @@ type Server struct {
 
 func New(cfg Config, x *engine.Exchange, feeds map[string]*feed.Feed, reports *feed.Reports) *Server {
 	cfg.MinTrader = max(cfg.MinTrader, 1)
+	cfg.Risk.setDefaults()
 	if cfg.WriteTimeout <= 0 {
 		cfg.WriteTimeout = 5 * time.Second
 	}
@@ -181,12 +186,16 @@ func intParam(r *http.Request, name string, def, lo, hi int) (int, bool) {
 type symbolInfo struct {
 	Symbol
 	feed.Ticker
+	band
+	MaxQty      int64   `json:"max_qty"`
+	MaxNotional float64 `json:"max_notional"`
 }
 
 func (s *Server) handleSymbols(w http.ResponseWriter, _ *http.Request) {
 	out := make([]symbolInfo, 0, len(s.cfg.Symbols))
 	for _, sym := range s.cfg.Symbols {
-		out = append(out, symbolInfo{Symbol: sym, Ticker: s.feeds[sym.Name].Ticker()})
+		out = append(out, symbolInfo{Symbol: sym, Ticker: s.feeds[sym.Name].Ticker(), band: s.band(sym),
+			MaxQty: s.cfg.Risk.MaxQty, MaxNotional: s.cfg.Risk.MaxNotional})
 	}
 	writeJSON(w, http.StatusOK, out)
 }

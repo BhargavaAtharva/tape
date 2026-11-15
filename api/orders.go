@@ -193,6 +193,13 @@ func (s *Server) handleNewOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_order", msg)
 		return
 	}
+	if book.Validate(cmd) == book.ReasonNone {
+		sym, _ := s.symbol(req.Symbol)
+		if rerr := s.checkNew(sym, &cmd); rerr != nil {
+			writeRisk(w, rerr)
+			return
+		}
+	}
 	s.submit(w, r, e, cmd)
 }
 
@@ -252,7 +259,21 @@ func (s *Server) handleAmend(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	s.submit(w, r, e, book.Command{Kind: book.CmdAmend, Trader: trader, OrderID: id, Price: req.Price, Qty: req.Qty})
+	cmd := book.Command{Kind: book.CmdAmend, Trader: trader, OrderID: id, Price: req.Price, Qty: req.Qty}
+	if book.Validate(cmd) == book.ReasonNone {
+		ctx, cancel := context.WithTimeout(r.Context(), submitTimeout)
+		rerr, err := s.checkAmend(ctx, e, cmd)
+		cancel()
+		if err != nil {
+			engineError(w, err)
+			return
+		}
+		if rerr != nil {
+			writeRisk(w, rerr)
+			return
+		}
+	}
+	s.submit(w, r, e, cmd)
 }
 
 type openOrder struct {

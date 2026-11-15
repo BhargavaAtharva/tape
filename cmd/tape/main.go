@@ -28,7 +28,7 @@ import (
 type config struct {
 	addr          string
 	symbols       []api.Symbol
-	refs          []int64
+	risk          api.Risk
 	dataDir       string
 	walSync       wal.SyncPolicy
 	walInterval   time.Duration
@@ -56,7 +56,7 @@ func loadConfig() (config, error) {
 		origins: strings.Split(env("TAPE_CORS_ORIGINS", "*"), ","),
 	}
 	var err error
-	if c.symbols, c.refs, err = parseSymbols(env("TAPE_SYMBOLS", "BTC-USD:2:64250,ETH-USD:2:3120,SOL-USD:3:148.5,NIFTY:2:24350")); err != nil {
+	if c.symbols, err = parseSymbols(env("TAPE_SYMBOLS", "BTC-USD:2:64250,ETH-USD:2:3120,SOL-USD:3:148.5,NIFTY:2:24350")); err != nil {
 		return c, err
 	}
 	if c.walSync, err = wal.ParseSyncPolicy(env("TAPE_WAL_SYNC", "batch")); err != nil {
@@ -77,6 +77,21 @@ func loadConfig() (config, error) {
 	if c.feedBuffer, err = strconv.Atoi(env("TAPE_FEED_BUFFER", "512")); err != nil {
 		return c, fmt.Errorf("TAPE_FEED_BUFFER: %w", err)
 	}
+	if c.risk.CollarPct, err = strconv.ParseFloat(env("TAPE_COLLAR_PCT", "10"), 64); err != nil {
+		return c, fmt.Errorf("TAPE_COLLAR_PCT: %w", err)
+	}
+	if c.risk.StaticPct, err = strconv.ParseFloat(env("TAPE_STATIC_BAND_PCT", "25"), 64); err != nil {
+		return c, fmt.Errorf("TAPE_STATIC_BAND_PCT: %w", err)
+	}
+	if c.risk.MaxQty, err = strconv.ParseInt(env("TAPE_MAX_ORDER_QTY", "10000"), 10, 64); err != nil {
+		return c, fmt.Errorf("TAPE_MAX_ORDER_QTY: %w", err)
+	}
+	if c.risk.MaxNotional, err = strconv.ParseFloat(env("TAPE_MAX_NOTIONAL", "5000000"), 64); err != nil {
+		return c, fmt.Errorf("TAPE_MAX_NOTIONAL: %w", err)
+	}
+	if c.risk.OrderTTL, err = time.ParseDuration(env("TAPE_ORDER_TTL", "30m")); err != nil {
+		return c, fmt.Errorf("TAPE_ORDER_TTL: %w", err)
+	}
 	if c.feedInterval, err = time.ParseDuration(env("TAPE_FEED_INTERVAL", "100ms")); err != nil {
 		return c, fmt.Errorf("TAPE_FEED_INTERVAL: %w", err)
 	}
@@ -92,26 +107,24 @@ func loadConfig() (config, error) {
 // parseSymbols reads "NAME:scale:ref,..." where ref is the simulator's
 // reference price in display units. The order matters once a data
 // directory exists, because a symbol's position is part of its order ids.
-func parseSymbols(s string) ([]api.Symbol, []int64, error) {
+func parseSymbols(s string) ([]api.Symbol, error) {
 	var syms []api.Symbol
-	var refs []int64
 	for item := range strings.SplitSeq(s, ",") {
 		parts := strings.Split(strings.TrimSpace(item), ":")
 		if len(parts) != 3 {
-			return nil, nil, fmt.Errorf("TAPE_SYMBOLS: %q is not NAME:price_scale:reference_price", item)
+			return nil, fmt.Errorf("TAPE_SYMBOLS: %q is not NAME:price_scale:reference_price", item)
 		}
 		scale, err := strconv.Atoi(parts[1])
 		if err != nil || scale < 0 || scale > 8 {
-			return nil, nil, fmt.Errorf("TAPE_SYMBOLS: %q: price scale must be 0..8", item)
+			return nil, fmt.Errorf("TAPE_SYMBOLS: %q: price scale must be 0..8", item)
 		}
 		ref, err := strconv.ParseFloat(parts[2], 64)
 		if err != nil || ref <= 0 {
-			return nil, nil, fmt.Errorf("TAPE_SYMBOLS: %q: reference price must be positive", item)
+			return nil, fmt.Errorf("TAPE_SYMBOLS: %q: reference price must be positive", item)
 		}
-		syms = append(syms, api.Symbol{Name: parts[0], PriceScale: scale})
-		refs = append(refs, int64(math.Round(ref*math.Pow10(scale))))
+		syms = append(syms, api.Symbol{Name: parts[0], PriceScale: scale, Ref: int64(math.Round(ref * math.Pow10(scale)))})
 	}
-	return syms, refs, nil
+	return syms, nil
 }
 
 func main() {
@@ -133,6 +146,7 @@ func run() error {
 	}
 	st, err := api.Start(api.Config{
 		Symbols:    cfg.symbols,
+		Risk:       cfg.risk,
 		Origins:    cfg.origins,
 		RateLimit:  cfg.rateLimit,
 		TrustProxy: cfg.trustProxy,
@@ -159,7 +173,7 @@ func run() error {
 	if cfg.sim {
 		markets := make([]sim.Market, len(cfg.symbols))
 		for i, s := range cfg.symbols {
-			markets[i] = sim.Market{Symbol: s.Name, Ref: cfg.refs[i]}
+			markets[i] = sim.Market{Symbol: s.Name, Ref: s.Ref}
 		}
 		go func() {
 			defer close(simDone)
