@@ -3,7 +3,7 @@ package book
 import (
 	"fmt"
 	"math/rand/v2"
-	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -327,7 +327,7 @@ func drive(data []byte) error {
 			return fmt.Errorf("command %d %+v: %w", i, c, err)
 		}
 		if twin != nil {
-			if tw := twin.Apply(c); !reflect.DeepEqual(tw, evs) {
+			if tw := twin.Apply(c); !slices.Equal(tw, evs) {
 				return fmt.Errorf("command %d %+v: restored twin diverged", i, c)
 			}
 		}
